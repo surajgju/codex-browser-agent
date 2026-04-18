@@ -1,0 +1,34 @@
+.container {
+    padding: 10px;
+    font-family: var(--vscode-font-family);
+}
+button {
+    margin: 5px 0;
+    padding: 5px 10px;
+}
+#file-list {
+    max-height: 150px;
+    overflow-y: auto;
+}
+#prompt-input {
+    width: 100%;
+    height: 80px;
+    margin: 5px 0;
+}
+#response-content {
+    background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+    color: var(--vscode-editor-foreground);
+    padding: 8px;
+    border: 1px solid var(--vscode-panel-border);
+    white-space: pre; /* Do not wrap bash script lines, allow horizontal scrolling */
+    overflow-x: auto; /* Allow horizontal scroll for long lines */
+    min-height: 200px;
+    max-height: 60vh; /* Use 60% of viewport height instead of a fixed 200px */
+    overflow-y: auto; /* Scroll vertically for large responses */
+    font-size: 13px;
+    line-height: 1.4;
+    border-radius: 4px;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+}

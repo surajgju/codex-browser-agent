@@ -7,7 +7,10 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other", "AI"],
+  "categories": [
+    "Other",
+    "AI"
+  ],
   "activationEvents": [
     "onCommand:codex-browser-agent.openSidebar",
     "onStartupFinished"
@@ -70,7 +73,9 @@
         },
         "codex-browser-agent.allowedCommands": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Whitelist of allowed terminal commands (empty = prompt for every command)."
         },
@@ -100,15 +105,28 @@
     "package": "vsce package"
   },
   "devDependencies": {
+    "@types/diff": "^7.0.2",
     "@types/node": "18.x",
+    "@types/temp": "^0.9.4",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/vsce": "^2.22.0",
     "eslint": "^8.0.0",
-    "typescript": "^5.0.0",
-    "@vscode/vsce": "^2.22.0"
+    "typescript": "^5.0.0"
   },
   "dependencies": {
-    "playwright": "^1.40.0"
+    "@xenova/transformers": "^2.17.2",
+    "chokidar": "^5.0.0",
+    "diff": "^9.0.0",
+    "hnswlib-node": "^3.0.0",
+    "playwright": "^1.40.0",
+    "sqlite3": "^6.0.1",
+    "temp": "^0.9.4",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-java": "^0.23.5",
+    "tree-sitter-python": "^0.23.6",
+    "tree-sitter-typescript": "^0.20.5",
+    "vscode-languageclient": "^9.0.1"
   }
 }

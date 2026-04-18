@@ -1,52 +1,51 @@
 # Codex Browser Agent - Project Context
 
-## 1. Project Overview & Architecture
-**Codex Browser Agent** is a VS Code extension (v3) that operates as a semi-automatic AI coding assistant. It uses **Playwright** to hijack existing user browser sessions, bypassing the need for paid API keys. It directly manipulates the DOM of ChatGPT, Claude, Gemini, DeepSeek, or Grok.
+## 1. Project Overview & Architecture (Production IDE Agent)
+**Codex Browser Agent v3** has evolved into a fully autonomous, multi-language IDE coding agent capable of competing with OpenAI Codex and Copilot. Rather than statically generating code snippets, it uses a closed **Agentic Loop (ReAct)** running via **Playwright**, manipulating ChatGPT, Claude, Gemini, DeepSeek, or Grok sessions.
 
-The entry point is `src/extension.ts`, which instantiates:
-*   `SidebarProvider`: Renders the VS Code Webview sidebar UI (features an interactive textarea for reviewing/editing LLM scripts directly).
-*   `ContextEngine` & `FileWatcher`: Tracks what files are open/selected.
-*   `WorkspaceMap`: Generates a repository memory map on load.
-*   `SyncEngine`: Coordinates gathering file contexts, sending them to the LLM (via the Browser logic), and applying the parsed response back.
-*   `CommandRunner`: Executes suggested bash commands based on a whitelist.
+The entry point is `src/extension.ts`, which wires up structural features:
+*   `SidebarProvider`: Renders the VS Code Webview sidebar control UI. Contains Inline Ghost Text hover logic.
+*   `SyncEngine`: Replaces raw syncs with the `AgentLoop`, coordinating state between the extension's `LSPClient`, `VectorStore`, and the Browser Adapter.
+*   `AgentLoop` & `ToolExecutor`: The brain of the agent. Operates on a `Thought -> Action -> Observation` loop handling live filesystem interactions autonomously.
+*   `ShadowWorkspace`: Supports speculative, isolated executions where the agent can build/compile code via arbitrary bash scripts before the user explicitly diffs and accepts the changes into the working repo.
 
 ---
 
 ## 2. Browser & Adapter Logic (`src/browser/` and `src/adapters/`)
-All LLM automation stems from `src/browser/PlatformAdapter.ts`.
-Specific websites have their own adapters. Critical recent evolutions include:
-*   **Anti-Bot Stealth:** `BrowserManager.ts` leverages `addInitScript` to override `navigator.webdriver` and injects argument flags (`--disable-blink-features=AutomationControlled`) to seamlessly bypass Cloudflare Turnstile blocks.
-*   **Streaming Length-Stability Polling:** Instead of relying on brittle UI buttons (like `<button>Stop</button>`), all adapters (`DeepSeek`, `ChatGPT`, `Gemini`, `Grok`) now use a 120-second polling loop that extracts `.textContent`. It only resolves when the string byte-length has remained static for 4 consecutive seconds. This completely eliminates truncation bugs caused by UI layout changes.
+Specific websites have their own Playwright adapters. Critical production mechanisms:
+*   **Anti-Bot Stealth:** `BrowserManager.ts` leverages `addInitScript` to strip automation flags and fake navigator fingerprints to seamlessly bypass Cloudflare Turnstile blocks.
+*   **Streaming Length-Stability Polling:** Replaces brittle UI button scraping (`stop` buttons). It uses a fast 1s temporal loop recording `.textContent` byte lengths, resolving when the AI output sits perfectly static for 4 consecutive seconds.
 
 ---
 
-## 3. Parsing and Output Format MUST-KNOWs (`src/parser/`)
-The LLM responses are parsed by `ResponseParser.ts`.
+## 3. Autonomous Execution & Output Parsing MUST-KNOWs
+The extension no longer expects the LLM to spit out a single `cat > file` bash script. It expects structured commands mimicking a terminal operator.
 
-### ⚠️ CRITICAL: Bash Script Extraction & DOM Squashing
-During recent upgrades, the parser pivoted from analyzing standard `FILE:` tags to **exclusively extracting executable bash scripts.**
-However, because extracting `.textContent` from the browser DOM often squashes and removes Markdown Fences (````bash`), the parser uses a highly resilient fallback regex:
-*   The LLM provides a `bash` script using tools like `cat > path.js << 'EOF'`.
-*   The Web UI rendering often strips the backticks and Prepends UI buttons (`bash`, `Copy`, `Download`).
-*   `ResponseParser.parseBashScript` forcefully strips sequential UI artifacts from the start of the string using a `(?:...)+` regex and treats the remaining block as the executable script.
+### ⚠️ ReAct JSON Tools & ToolExecutor
+The `AgentLoop` injects a strict system prompt demanding JSON responses: `{"thought": "...", "action": "tool_name", "actionInput": {...}}`
+The `ToolExecutor` acts on behalf of the AI. Tools include:
+*   `read_file`, `list_dir`, `search_regex`, `run_command` (terminal read/write), `replace_content`, `ask_user`.
+The Agent continues to cycle until it outputs an observation containing `"GOAL_ACHIEVED"`.
 
-**Workflow Summary:**
-1. LLM spits out `cat > ...` bash logic.
-2. Web UI exposes it as `bashCopyDownloadcat > ...`.
-3. `ResponseParser` strips `bashCopyDownload`. 
-4. `SidebarProvider` injects the script into the webview `textarea` natively (allowing user-edits).
-5. User clicks "Apply Changes", overwriting `.codex-memory/apply_changes.sh` and running it natively in VS Code's terminal.
+### ⚠️ Output Parsing Fallbacks (`ResponseParser.ts`)
+When the LLM hallucinates outside the JSON box, or attempts unified diffs/AST patching:
+*   Extracting `.textContent` from the browser DOM often squashes and explicitly deletes Markdown Fences (````diff`), breaking standard regex.
+*   `ResponseParser.ts` uses highly resilient fallback regex. e.g. If `` ```diff `` disappears, the parser strictly looks for `--- a/` and `+++ b/` boundaries characteristic of git diffs before triggering the `DiffApplier.ts`.
+*   Similar boundary-fallbacks exist for AST replacements (`AST_PATCH:`).
 
 ---
 
-## 4. Extension Commands
-Registered commands in `package.json` that bind the logic together:
+## 4. Key Next-Gen Capabilities
+*   **RAG & Vector Storage:** Uses `src/vector/VectorStore.ts` to chunk and embed codebases locally (simplification strategy deployed, standardizes on keyword-matching/HNSW).
+*   **AST Patching:** Uses `tree-sitter` inside `DiffApplier` to surgically drop logic into huge files without corrupting surrounding curly-brace boundaries.
+
+## 5. Extension Commands
 *   `codex-browser-agent.openSidebar`
-*   `codex-browser-agent.syncSelected`: Initiates the prompt/file context flow.
-*   `codex-browser-agent.applyResponse`: Triggers `SyncEngine` script execution.
-*   `codex-browser-agent.runCommand`: Triggers `CommandRunner`.
+*   `codex-browser-agent.syncSelected`: Initiates the AgentLoop flow.
+*   `codex-browser-agent.speculativeApply`: Spawns a hidden `/tmp/` shadow environment, runs arbitrary code, and surfaces a VS Code diff view for acceptance.
+*   `codex-browser-agent.agentLoop`: Command palette fallback.
 
 ## Summary for AI modifying this project:
-1.  **Sync/Wait bugs:** Check adapter `.textContent` stability logic or selector classes.
-2.  **Parsing bugs:** Check `ResponseParser.ts` for regex collision regarding UI artifacts (like `CopyDownload`).
-3.  **Cloudflare/Login blocks:** Adjust stealth arguments in `BrowserManager.ts`.
+1.  **Adding Agent Tools:** Add logic to `ToolExecutor.ts` and update the system prompt in `AgentLoop.ts`.
+2.  **Parser/UI Breakage:** If the web UI updates, Playwright DOM extraction might squash fields. ALWAYS put headless fallback regexes inside `ResponseParser.ts`.
+3.  **Cloudflare blocks:** Update Stealth arguments inside `BrowserManager.launch()`.

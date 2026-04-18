@@ -13,6 +13,9 @@ import { DeepSeekAdapter } from '../adapters/DeepSeekAdapter';
 import { PlatformAdapter } from '../browser/PlatformAdapter';
 import { UnifiedDiffParser } from '../parser/UnifiedDiffParser';
 import { ResponseParser } from '../parser/ResponseParser';
+import { AgentLoop } from "../agent/AgentLoop";
+import { LSPClient } from "../lsp/LSPClient";
+import { VectorStore } from "../vector/VectorStore";
 import { RetrievalEngine } from '../memory/RetrievalEngine';
 import { IterationTracker } from '../memory/IterationTracker';
 import { Logger } from '../utils/logger';
@@ -23,6 +26,8 @@ export class SyncEngine {
     private retrievalEngine: RetrievalEngine;
     private iterationTracker: IterationTracker;
     private sidebarPostMessage?: (message: any) => void;
+    private lspClient: LSPClient;
+    private vectorStore: VectorStore;
 
     constructor(
         private config: Config,
@@ -34,6 +39,10 @@ export class SyncEngine {
         this.retrievalEngine = new RetrievalEngine(workspaceFolder);
         this.iterationTracker = new IterationTracker(workspaceFolder);
         this.registerAdapters();
+        this.lspClient = new LSPClient();
+        this.vectorStore = new VectorStore();
+        this.lspClient.initialize();
+        this.vectorStore.initialize();
     }
 
     private registerAdapters() {
@@ -54,7 +63,7 @@ export class SyncEngine {
     }
 
     async syncToPlatform(platform: string, files: string[], prompt: string) {
-        Logger.info(`SyncEngine: Starting sync to ${platform} with ${files.length} files`);
+        Logger.info(`SyncEngine: Using autonomous agent loop for ${platform}`);
         try {
             const adapter = this.adapters.get(platform);
             if (!adapter) throw new Error(`No adapter for ${platform}`);
@@ -63,44 +72,27 @@ export class SyncEngine {
             const context = this.retrievalEngine.buildContext(prompt, workspaceRoot);
             const contextBlock = this.retrievalEngine.formatContextForPrompt(context);
             
-            const augmentedPrompt = `${contextBlock}
+            const augmentedPrompt = `${contextBlock}\n\n## User Request\n${prompt}`;
 
-## User Request
-${prompt}
-
-## Output Format (MANDATORY)
-You MUST respond with a single bash script that applies all the necessary changes to the project.
-Wrap your bash script inside a standard markdown bash code block:
-\`\`\`bash
-# Your script here (e.g. using cat > path/to/file << 'EOF' ... EOF)
-\`\`\`
-Do not output anything else.`;
-
-            Logger.info(`SyncEngine: Prompt augmented`);
-
+            Logger.info(`SyncEngine: Agent prompt augmented`);
             await adapter.initialize();
-            await adapter.uploadFiles(files);
-            await adapter.sendPrompt(augmentedPrompt);
             
-            const response = await adapter.waitForResponse();
-            const responseContent = response?.content || '';
-            Logger.info(`SyncEngine: Response received (${responseContent.length} chars)`);
-            
+            const agent = new AgentLoop(adapter, this.lspClient, this.vectorStore);
+            await agent.run(augmentedPrompt);
+
             if (this.sidebarPostMessage) {
-                this.sidebarPostMessage({ type: 'response', content: responseContent });
-                Logger.info('SyncEngine: Response sent to sidebar');
-            } else {
-                Logger.warn('SyncEngine: No sidebar callback, response not displayed');
+                this.sidebarPostMessage({ type: 'response', content: "[Agent loop completed. Check workspace/shadow directories.]" });
+                Logger.info('SyncEngine: Agent completion notification sent to sidebar');
             }
 
             this.iterationTracker.track({
                 platform,
                 prompt,
                 files,
-                responseSummary: responseContent.substring(0, 200)
+                responseSummary: "Autonomous Agent Execution"
             });
         } catch (error) {
-            Logger.error(`SyncEngine: Sync failed - ${error}`);
+            Logger.error(`SyncEngine: Agent loop failed - ${error}`);
             this.errorHandler.handle(error);
         }
     }
@@ -163,3 +155,4 @@ Do not output anything else.`;
         this.browserManager.closeAll();
     }
 }
+

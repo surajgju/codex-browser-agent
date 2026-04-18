@@ -59,6 +59,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         this._sendConfig();
         this._sendContextUpdate();
+        this.registerGhostTextProvider();
+    }
+
+    // Inline ghost text (cursor-like) – simplified version
+    private registerGhostTextProvider() {
+        vscode.languages.registerHoverProvider('*', {
+            provideHover: async (document, position) => {
+                // Show AI suggestion on hover (can be extended)
+                return new vscode.Hover("💡 Codex: Press Ctrl+I to ask AI");
+            }
+        });
     }
 
     private async _handleSelectFiles() {

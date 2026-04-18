@@ -1,303 +1,531 @@
 #!/bin/bash
-set -e
+set -e  # exit on error
 
-echo "🔧 Applying brute-force logging and parser resilience..."
+# ------------------------------------------------------------
+# 1. Configuration & safety
+# ------------------------------------------------------------
+PROJECT_ROOT="$(pwd)"
+BACKUP_DIR="$PROJECT_ROOT/.codex-pre-upgrade-backup"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-cp src/sync/SyncEngine.ts .backups/SyncEngine.ts.final
-cp src/parser/ResponseParser.ts .backups/ResponseParser.ts.final
+echo "🚀 Codex Browser Agent → Production Grade Upgrade"
+echo "Project root: $PROJECT_ROOT"
 
-# ------------------------------------------------------------------
-# 1. SyncEngine with VERBATIM logging
-# ------------------------------------------------------------------
-cat > src/sync/SyncEngine.ts << 'EOF'
+# Optional backup (comment out to skip)
+read -p "Create backup of current source in $BACKUP_DIR? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    mkdir -p "$BACKUP_DIR"
+    cp -r src "$BACKUP_DIR/src_$TIMESTAMP"
+    cp package.json "$BACKUP_DIR/package_$TIMESTAMP.json"
+    echo "✅ Backup saved to $BACKUP_DIR"
+fi
+
+# ------------------------------------------------------------
+# 2. Install new dependencies
+# ------------------------------------------------------------
+echo "📦 Installing required npm packages..."
+npm install --save --legacy-peer-deps \
+    vscode-languageclient \
+    tree-sitter@0.21.1 \
+    tree-sitter-typescript@0.20.5 \
+    tree-sitter-python@0.23.6 \
+    tree-sitter-java@0.23.5 \
+    hnswlib-node \
+    sqlite3 \
+    @xenova/transformers \
+    diff \
+    temp \
+    chokidar
+
+npm install --save-dev --legacy-peer-deps \
+    @types/diff \
+    @types/temp
+echo "📁 Creating module directories..."
+mkdir -p src/agent
+mkdir -p src/lsp
+mkdir -p src/vector
+mkdir -p src/diff
+mkdir -p src/speculative
+mkdir -p src/orchestrator
+
+# ------------------------------------------------------------
+# 4. Write new TypeScript files (core modules)
+# ------------------------------------------------------------
+
+# 4.1 Agent loop with ReAct and tool calling
+cat > src/agent/AgentLoop.ts << 'EOF'
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
-import { Config } from '../utils/config';
-import { ErrorHandler } from '../utils/errorHandler';
-import { StorageHelper } from '../utils/storage';
-import { BrowserManager } from '../browser/BrowserManager';
-import { ChatGPTAdapter } from '../adapters/ChatGPTAdapter';
-import { GeminiAdapter } from '../adapters/GeminiAdapter';
-import { ClaudeAdapter } from '../adapters/ClaudeAdapter';
-import { GrokAdapter } from '../adapters/GrokAdapter';
-import { DeepSeekAdapter } from '../adapters/DeepSeekAdapter';
 import { PlatformAdapter } from '../browser/PlatformAdapter';
-import { UnifiedDiffParser } from '../parser/UnifiedDiffParser';
-import { ResponseParser } from '../parser/ResponseParser';
-import { RetrievalEngine } from '../memory/RetrievalEngine';
-import { IterationTracker } from '../memory/IterationTracker';
+import { ToolExecutor } from './ToolExecutor';
+import { LSPClient } from '../lsp/LSPClient';
+import { VectorStore } from '../vector/VectorStore';
 import { Logger } from '../utils/logger';
 
-export class SyncEngine {
-    private browserManager: BrowserManager;
-    private adapters: Map<string, PlatformAdapter> = new Map();
-    private retrievalEngine: RetrievalEngine;
-    private iterationTracker: IterationTracker;
-    private sidebarPostMessage?: (message: any) => void;
+export interface AgentStep {
+    thought: string;
+    action: string;
+    actionInput: any;
+    observation: string;
+}
+
+export class AgentLoop {
+    private toolExecutor: ToolExecutor;
+    private maxIterations = 10;
+    private steps: AgentStep[] = [];
 
     constructor(
-        private config: Config,
-        private errorHandler: ErrorHandler,
-        private storage: StorageHelper
+        private adapter: PlatformAdapter,
+        private lsp: LSPClient,
+        private vectorStore: VectorStore
     ) {
-        this.browserManager = BrowserManager.getInstance(config);
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        this.retrievalEngine = new RetrievalEngine(workspaceFolder);
-        this.iterationTracker = new IterationTracker(workspaceFolder);
-        this.registerAdapters();
+        this.toolExecutor = new ToolExecutor(lsp, vectorStore);
     }
 
-    private registerAdapters() {
-        this.adapters.set('chatgpt', new ChatGPTAdapter(this.browserManager));
-        this.adapters.set('gemini', new GeminiAdapter(this.browserManager));
-        this.adapters.set('claude', new ClaudeAdapter(this.browserManager));
-        this.adapters.set('grok', new GrokAdapter(this.browserManager));
-        this.adapters.set('deepseek', new DeepSeekAdapter(this.browserManager));
-    }
-
-    setSidebarPostMessage(callback: (message: any) => void) {
-        this.sidebarPostMessage = callback;
-        Logger.info('SyncEngine: Sidebar callback registered');
-    }
-
-    async syncSelected() {
-        vscode.window.showInformationMessage('Sync initiated from command palette');
-    }
-
-    async syncToPlatform(platform: string, files: string[], prompt: string) {
-        Logger.info(`SyncEngine: Starting sync to ${platform} with ${files.length} files`);
-        try {
-            const adapter = this.adapters.get(platform);
-            if (!adapter) throw new Error(`No adapter for ${platform}`);
-
-            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-            const context = this.retrievalEngine.buildContext(prompt, workspaceRoot);
-            const contextBlock = this.retrievalEngine.formatContextForPrompt(context);
+    async run(initialPrompt: string): Promise<void> {
+        let currentPrompt = initialPrompt;
+        for (let i = 0; i < this.maxIterations; i++) {
+            Logger.info(`Agent iteration ${i+1}`);
+            // Send prompt + available tools to LLM
+            const systemPrompt = this.buildSystemPrompt();
+            const response = await this.adapter.sendPromptAndGetResponse(systemPrompt + "\n\n" + currentPrompt);
+            const { thought, action, actionInput } = this.parseResponse(response.content);
             
-            const augmentedPrompt = `${contextBlock}
-
-## User Request
-${prompt}
-
-## Output Format (MANDATORY)
-You MUST respond with EXACTLY the following format for any file changes:
-
-FILE: path/to/file.ext
-<entire file content>
-END_FILE
-
-Do not add extra text before or after. Do not use markdown code fences inside.`;
-
-            Logger.info(`SyncEngine: Prompt augmented`);
-
-            await adapter.initialize();
-            await adapter.uploadFiles(files);
-            await adapter.sendPrompt(augmentedPrompt);
+            // Execute tool
+            const observation = await this.toolExecutor.execute(action, actionInput);
+            this.steps.push({ thought, action, actionInput, observation });
             
-            const response = await adapter.waitForResponse();
-            const responseContent = response?.content || '';
-            Logger.info(`SyncEngine: Response received (${responseContent.length} chars)`);
+            // Check if goal achieved
+            if (this.isGoalAchieved(observation)) break;
             
-            if (this.sidebarPostMessage) {
-                this.sidebarPostMessage({ type: 'response', content: responseContent });
-                Logger.info('SyncEngine: Response sent to sidebar');
-            } else {
-                Logger.warn('SyncEngine: No sidebar callback, response not displayed');
-            }
-
-            this.iterationTracker.track({
-                platform,
-                prompt,
-                files,
-                responseSummary: responseContent.substring(0, 200)
-            });
-        } catch (error) {
-            Logger.error(`SyncEngine: Sync failed - ${error}`);
-            this.errorHandler.handle(error);
+            // Feed observation back to LLM
+            currentPrompt = `Observation: ${observation}\n\nContinue with next step.`;
         }
     }
 
-    async applyResponse(responseData: any) {
-        Logger.info(`=== applyResponse START ===`);
-        let responseText = '';
-        if (typeof responseData === 'string') {
-            responseText = responseData;
-        } else if (responseData && typeof responseData.content === 'string') {
-            responseText = responseData.content;
-        } else {
-            Logger.error('Invalid response data');
-            vscode.window.showErrorMessage('Invalid response data');
-            return;
-        }
+    private buildSystemPrompt(): string {
+        return `You are an autonomous coding agent. Available tools:
+- read_file(path) -> file content
+- list_dir(path) -> directory listing
+- search_regex(pattern, path) -> matches
+- replace_content(file, old_str, new_str) -> applies change
+- run_command(cmd) -> stdout/stderr
+- ask_user(question) -> user answer
 
-        if (!responseText.trim()) {
-            vscode.window.showWarningMessage('AI response is empty.');
-            return;
-        }
-
-        // 🔍 VERBATIM LOGGING – write raw response to file for inspection
-        const memPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '.', '.codex-memory');
-        if (!fs.existsSync(memPath)) fs.mkdirSync(memPath, { recursive: true });
-        const rawFile = path.join(memPath, 'raw_response.txt');
-        fs.writeFileSync(rawFile, responseText, 'utf8');
-        Logger.info(`Raw response written to ${rawFile}`);
-        Logger.info(`Response starts with: ${responseText.substring(0, 100)}`);
-
-        let parsedChanges = ResponseParser.parseFILEBlocks(responseText).map(f => ({ filePath: f.path, content: f.content }));
-        Logger.info(`FILE blocks parsed: ${parsedChanges.length}`);
-
-        if (parsedChanges.length === 0) {
-            // Fallback: extract code fence content
-            const fenceMatch = responseText.match(/```(?:\w*)\s*([\s\S]*?)```/);
-            if (fenceMatch) {
-                const guessedPath = 'sample.html';
-                parsedChanges = [{ filePath: guessedPath, content: fenceMatch[1].trim() }];
-                Logger.info(`Extracted code fence, using ${guessedPath}`);
-            }
-        }
-
-        if (parsedChanges.length === 0) {
-            parsedChanges = UnifiedDiffParser.parse(responseText);
-            Logger.info(`Unified diff parsed: ${parsedChanges.length}`);
-        }
-
-        if (parsedChanges.length === 0) {
-            vscode.window.showWarningMessage('No file changes detected. Check .codex-memory/raw_response.txt');
-            return;
-        }
-
-        if (this.config.showDiffBeforeApply) {
-            const choice = await vscode.window.showInformationMessage(
-                `Apply changes to ${parsedChanges.length} file(s)?`,
-                { modal: true },
-                'Yes', 'Show Diff', 'No'
-            );
-            if (choice === 'Show Diff') {
-                const first = parsedChanges[0];
-                const originalUri = vscode.Uri.file(first.filePath);
-                const modifiedUri = vscode.Uri.parse(`untitled:${path.basename(first.filePath)}.modified`);
-                await vscode.workspace.fs.writeFile(modifiedUri, Buffer.from(first.content));
-                await vscode.commands.executeCommand('vscode.diff', originalUri, modifiedUri, `${first.filePath} (AI Suggested)`);
-                return;
-            } else if (choice !== 'Yes') {
-                return;
-            }
-        }
-
-        let appliedCount = 0;
-        for (const file of parsedChanges) {
-            try {
-                const uri = vscode.Uri.file(file.filePath);
-                const dir = path.dirname(file.filePath);
-                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-                await vscode.workspace.fs.writeFile(uri, Buffer.from(file.content));
-                appliedCount++;
-                Logger.info(`Wrote ${file.filePath}`);
-            } catch (e) {
-                Logger.error(`Failed to write ${file.filePath}: ${e}`);
-            }
-        }
-
-        vscode.window.showInformationMessage(`✅ Applied changes to ${appliedCount} file(s).`);
-        Logger.info(`=== applyResponse END ===`);
+Respond in JSON format: {"thought": "...", "action": "tool_name", "actionInput": {...}}`;
     }
 
-    dispose() {
-        this.browserManager.closeAll();
+    private parseResponse(content: string): any {
+        // Extract JSON from LLM response (simplified)
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        return jsonMatch ? JSON.parse(jsonMatch[0]) : { thought: "", action: "ask_user", actionInput: { question: "Could not parse action" } };
+    }
+
+    private isGoalAchieved(observation: string): boolean {
+        return observation.includes("GOAL_ACHIEVED");
     }
 }
 EOF
 
-# ------------------------------------------------------------------
-# 2. Ultra-resilient ResponseParser
-# ------------------------------------------------------------------
-cat > src/parser/ResponseParser.ts << 'EOF'
+# 4.2 Tool executor (file ops, search, run commands)
+cat > src/agent/ToolExecutor.ts << 'EOF'
+import * as fs from 'fs';
+import * as path from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { LSPClient } from '../lsp/LSPClient';
+import { VectorStore } from '../vector/VectorStore';
 import { Logger } from '../utils/logger';
 
-export interface FileBlock {
-    path: string;
-    content: string;
-}
+const execAsync = promisify(exec);
 
-export class ResponseParser {
-    static parseFILEBlocks(text: any): FileBlock[] {
-        if (!text || typeof text !== 'string') {
-            Logger.warn('ResponseParser: non-string input');
-            return [];
+export class ToolExecutor {
+    constructor(private lsp: LSPClient, private vectorStore: VectorStore) {}
+
+    async execute(toolName: string, input: any): Promise<string> {
+        Logger.info(`Executing tool: ${toolName} with input ${JSON.stringify(input)}`);
+        switch (toolName) {
+            case 'read_file':
+                return this.readFile(input.path);
+            case 'list_dir':
+                return this.listDir(input.path);
+            case 'search_regex':
+                return this.searchRegex(input.pattern, input.path);
+            case 'replace_content':
+                return this.replaceContent(input.file, input.old_str, input.new_str);
+            case 'run_command':
+                return this.runCommand(input.cmd);
+            case 'ask_user':
+                return this.askUser(input.question);
+            default:
+                return `Unknown tool: ${toolName}`;
         }
-
-        const fileChanges: FileBlock[] = [];
-        
-        // Try multiple regex patterns
-        const patterns = [
-            /FILE:\s*([^\n\r]+)\s*\n([\s\S]*?)END_FILE/g,           // standard
-            /FILE:\s*([^\n\r]+)\s*\r?\n([\s\S]*?)END_FILE/g,        // with optional \r
-            /FILE:\s*([^\n\r]+)\s*([\s\S]*?)END_FILE/g,             // no newline after path
-            /FILE:\s*([^\n\r]+)\s*\n([\s\S]*?)(?=FILE:|$)/g,        // until next FILE or end
-        ];
-
-        for (const regex of patterns) {
-            let match;
-            while ((match = regex.exec(text)) !== null) {
-                let filePath = match[1].trim();
-                // Strip trailing artifacts
-                filePath = filePath.replace(/(Copy|Download|CopyDownload|\.html).*$/i, '');
-                const content = match[2].trim();
-                if (content.length > 0) {
-                    fileChanges.push({ path: filePath, content });
-                    Logger.info(`ResponseParser: Found FILE block for ${filePath} (${content.length} chars)`);
-                }
-            }
-            if (fileChanges.length > 0) break;
-        }
-
-        // If still nothing, try to find any line starting with "FILE:" manually
-        if (fileChanges.length === 0) {
-            const lines = text.split('\n');
-            for (let i = 0; i < lines.length; i++) {
-                if (lines[i].trim().startsWith('FILE:')) {
-                    const filePath = lines[i].replace('FILE:', '').trim().replace(/(Copy|Download).*$/i, '');
-                    // Collect content until END_FILE or end of text
-                    let contentLines = [];
-                    for (let j = i+1; j < lines.length; j++) {
-                        if (lines[j].trim() === 'END_FILE') break;
-                        contentLines.push(lines[j]);
-                    }
-                    const content = contentLines.join('\n').trim();
-                    if (content) {
-                        fileChanges.push({ path: filePath, content });
-                        Logger.info(`ResponseParser: Manual extraction for ${filePath}`);
-                    }
-                    break;
-                }
-            }
-        }
-
-        return fileChanges;
     }
 
-    static parseCommands(text: any): string[] {
-        if (!text || typeof text !== 'string') return [];
-        const cmds: string[] = [];
-        const regex = /COMMAND:\s*(.*)/g;
-        let match;
-        while ((match = regex.exec(text)) !== null) {
-            cmds.push(match[1]);
+    private async readFile(filePath: string): Promise<string> {
+        try {
+            return fs.readFileSync(filePath, 'utf-8');
+        } catch (err) {
+            return `Error reading file: ${err}`;
         }
-        return cmds;
+    }
+
+    private async listDir(dirPath: string): Promise<string> {
+        try {
+            const files = fs.readdirSync(dirPath);
+            return files.join('\n');
+        } catch (err) {
+            return `Error listing directory: ${err}`;
+        }
+    }
+
+    private async searchRegex(pattern: string, searchPath: string): Promise<string> {
+        // Simplified: use grep if available, else fallback
+        try {
+            const { stdout } = await execAsync(`grep -rn "${pattern}" "${searchPath}"`);
+            return stdout || "No matches found";
+        } catch {
+            return "Search failed or no matches";
+        }
+    }
+
+    private async replaceContent(file: string, oldStr: string, newStr: string): Promise<string> {
+        try {
+            const content = fs.readFileSync(file, 'utf-8');
+            const updated = content.replace(new RegExp(oldStr, 'g'), newStr);
+            fs.writeFileSync(file, updated, 'utf-8');
+            return `Replaced occurrences in ${file}`;
+        } catch (err) {
+            return `Replace failed: ${err}`;
+        }
+    }
+
+    private async runCommand(cmd: string): Promise<string> {
+        try {
+            const { stdout, stderr } = await execAsync(cmd);
+            return stdout || stderr || "Command executed (no output)";
+        } catch (err: any) {
+            return `Command failed: ${err.message}`;
+        }
+    }
+
+    private async askUser(question: string): Promise<string> {
+        const answer = await vscode.window.showInputBox({ prompt: question });
+        return answer || "User did not provide an answer";
     }
 }
 EOF
 
-npm run compile
+# 4.3 LSP Client (symbols, definitions, hover)
+cat > src/lsp/LSPClient.ts << 'EOF'
+import * as vscode from 'vscode';
+import { Logger } from '../utils/logger';
 
+export class LSPClient {
+    private client: vscode.LanguageClient | null = null;
+
+    async initialize(): Promise<void> {
+        // For simplicity, we use VS Code's built-in LSP via commands
+        // In a real implementation, you would create a LanguageClient for each language
+        Logger.info("LSP Client initialized (using VS Code native LSP)");
+    }
+
+    async getDefinitionAtPosition(uri: string, line: number, character: number): Promise<vscode.Location[]> {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const position = new vscode.Position(line, character);
+        return await vscode.commands.executeCommand<vscode.Location[]>(
+            'vscode.executeDefinitionProvider', doc.uri, position
+        ) || [];
+    }
+
+    async getSymbols(uri: string): Promise<vscode.DocumentSymbol[]> {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        return await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+            'vscode.executeDocumentSymbolProvider', doc.uri
+        ) || [];
+    }
+
+    async getHover(uri: string, line: number, character: number): Promise<string> {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const position = new vscode.Position(line, character);
+        const hover = await vscode.commands.executeCommand<vscode.Hover>(
+            'vscode.executeHoverProvider', doc.uri, position
+        );
+        return hover?.contents.map(c => c.toString()).join('\n') || '';
+    }
+}
+EOF
+
+# 4.4 Vector Store (RAG using HNSW)
+cat > src/vector/VectorStore.ts << 'EOF'
+import { HierarchicalNSW } from 'hnswlib-node';
+import * as fs from 'fs';
+import * as path from 'path';
+import { pipeline } from '@xenova/transformers';
+
+export class VectorStore {
+    private index: HierarchicalNSW | null = null;
+    private embedder: any;
+    private chunks: { text: string; filePath: string }[] = [];
+
+    async initialize(dimension = 384) {
+        this.index = new HierarchicalNSW('cosine', dimension);
+        this.embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+    }
+
+    async indexFile(filePath: string, chunkSize = 500) {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const lines = content.split('\n');
+        for (let i = 0; i < lines.length; i += chunkSize) {
+            const chunk = lines.slice(i, i + chunkSize).join('\n');
+            const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
+            const id = this.chunks.length;
+            this.index!.addPoint(embedding.data, id);
+            this.chunks.push({ text: chunk, filePath });
+        }
+    }
+
+    async search(query: string, k = 5): Promise<{ text: string; filePath: string; score: number }[]> {
+        const queryEmbedding = await this.embedder(query, { pooling: 'mean', normalize: true });
+        const result = this.index!.searchKnn(queryEmbedding.data, k);
+        return result.neighbors.map((id, idx) => ({
+            ...this.chunks[id],
+            score: result.distances[idx]
+        }));
+    }
+}
+EOF
+
+# 4.5 Unified Diff + AST Patching
+cat > src/diff/DiffApplier.ts << 'EOF'
+import * as fs from 'fs';
+import * as path from 'path';
+import * as diff from 'diff';
+import Parser from 'tree-sitter';
+import TypeScript from 'tree-sitter-typescript';
+import { Logger } from '../utils/logger';
+
+export class DiffApplier {
+    private parser: Parser;
+
+    constructor() {
+        this.parser = new Parser();
+        this.parser.setLanguage(TypeScript.typescript);
+    }
+
+    applyUnifiedDiff(filePath: string, unifiedDiff: string): boolean {
+        try {
+            const original = fs.readFileSync(filePath, 'utf-8');
+            const patches = diff.parsePatch(unifiedDiff);
+            const applied = diff.applyPatch(original, patches[0]);
+            if (typeof applied === 'string') {
+                fs.writeFileSync(filePath, applied, 'utf-8');
+                Logger.info(`Applied unified diff to ${filePath}`);
+                return true;
+            }
+            return false;
+        } catch (err) {
+            Logger.error(`Diff application failed: ${err}`);
+            return false;
+        }
+    }
+
+    applyASTPatch(filePath: string, targetNode: string, newCode: string): boolean {
+        const code = fs.readFileSync(filePath, 'utf-8');
+        const tree = this.parser.parse(code);
+        // Find node by pattern (simplified – real implementation would traverse)
+        const rootNode = tree.rootNode;
+        let start = -1, end = -1;
+        // Naive search for function/class declaration (example)
+        const regex = new RegExp(`(function|class)\\s+${targetNode}\\b[\\s\\S]*?\\n\\}`);
+        const match = code.match(regex);
+        if (match && match.index !== undefined) {
+            start = match.index;
+            end = start + match[0].length;
+            const newContent = code.slice(0, start) + newCode + code.slice(end);
+            fs.writeFileSync(filePath, newContent, 'utf-8');
+            Logger.info(`AST patch applied to ${filePath} (replaced ${targetNode})`);
+            return true;
+        }
+        return false;
+    }
+}
+EOF
+
+# 4.6 Speculative Execution & Shadow Workspace
+cat > src/speculative/ShadowWorkspace.ts << 'EOF'
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import * as crypto from 'crypto';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { Logger } from '../utils/logger';
+
+const execAsync = promisify(exec);
+
+export class ShadowWorkspace {
+    private shadowRoot: string;
+    private originalRoot: string;
+
+    constructor(originalRoot: string) {
+        this.originalRoot = originalRoot;
+        this.shadowRoot = path.join(os.tmpdir(), `codex-shadow-${crypto.randomBytes(8).toString('hex')}`);
+    }
+
+    async create(): Promise<void> {
+        await execAsync(`cp -r "${this.originalRoot}" "${this.shadowRoot}"`);
+        Logger.info(`Shadow workspace created at ${this.shadowRoot}`);
+    }
+
+    async runScript(scriptPath: string): Promise<{ stdout: string; stderr: string; success: boolean }> {
+        try {
+            const { stdout, stderr } = await execAsync(`bash "${scriptPath}"`, { cwd: this.shadowRoot });
+            return { stdout, stderr, success: true };
+        } catch (err: any) {
+            return { stdout: err.stdout, stderr: err.stderr, success: false };
+        }
+    }
+
+    async showDiff(): Promise<string> {
+        const { stdout } = await execAsync(`diff -urN "${this.originalRoot}" "${this.shadowRoot}" || true`);
+        return stdout;
+    }
+
+    async accept(): Promise<void> {
+        await execAsync(`rsync -a "${this.shadowRoot}/" "${this.originalRoot}/"`);
+        Logger.info("Changes accepted from shadow workspace");
+    }
+
+    async cleanup(): Promise<void> {
+        await execAsync(`rm -rf "${this.shadowRoot}"`);
+    }
+}
+EOF
+
+# 4.7 Multi-model orchestrator (fast router + heavy coder)
+cat > src/orchestrator/ModelRouter.ts << 'EOF'
+import { PlatformAdapter } from '../browser/PlatformAdapter';
+import { Logger } from '../utils/logger';
+
+export class ModelRouter {
+    constructor(
+        private fastAdapter: PlatformAdapter,   // e.g., Gemini Flash
+        private heavyAdapter: PlatformAdapter    // e.g., DeepSeek Coder
+    ) {}
+
+    async route(prompt: string, context: string): Promise<string> {
+        // Determine complexity: if prompt contains "refactor", "architecture", "large" → heavy
+        const isComplex = /refactor|architecture|large|many files|optimize/i.test(prompt);
+        const adapter = isComplex ? this.heavyAdapter : this.fastAdapter;
+        Logger.info(`Routing to ${isComplex ? 'heavy' : 'fast'} model`);
+        await adapter.initialize();
+        await adapter.sendPrompt(prompt + "\n\nContext:\n" + context);
+        const response = await adapter.waitForResponse();
+        return response.content;
+    }
+}
+EOF
+
+# ------------------------------------------------------------
+# 5. Patch existing files
+# ------------------------------------------------------------
+
+# 5.1 Modify SyncEngine.ts to use AgentLoop
+sed -i.bak '/import { ResponseParser }/a import { AgentLoop } from "..\/agent\/AgentLoop";\
+import { LSPClient } from "..\/lsp\/LSPClient";\
+import { VectorStore } from "..\/vector\/VectorStore";' src/sync/SyncEngine.ts
+
+sed -i.bak '/this.registerAdapters();/a \
+        this.lspClient = new LSPClient();\
+        this.vectorStore = new VectorStore();\
+        this.lspClient.initialize();\
+        this.vectorStore.initialize();' src/sync/SyncEngine.ts
+
+# Replace syncToPlatform method to use agent loop
+perl -i -0pe 's/async syncToPlatform\([^)]*\) \{.*?\/\/ Send prompt to adapter/syncToPlatform(platform: string, files: string[], prompt: string) {\n        Logger.info(`SyncEngine: Using autonomous agent loop`);\n        const adapter = this.adapters.get(platform);\n        if (!adapter) throw new Error(`No adapter for ${platform}`);\n        const agent = new AgentLoop(adapter, this.lspClient, this.vectorStore);\n        await agent.run(prompt);\n        return;\n        \/\/ Original code below (commented)\n        /s' src/sync/SyncEngine.ts
+
+# 5.2 Update ResponseParser.ts to support unified diff and AST patches
+cat >> src/parser/ResponseParser.ts << 'EOF'
+
+    static parseUnifiedDiff(text: string): string | null {
+        const match = text.match(/```diff\n([\s\S]*?)```/);
+        return match ? match[1] : null;
+    }
+
+    static parseASTPatch(text: string): { targetNode: string; newCode: string } | null {
+        const match = text.match(/AST_PATCH:\s*([^\n]+)\n```[\s\S]*?\n([\s\S]*?)```/);
+        if (match) {
+            return { targetNode: match[1].trim(), newCode: match[2] };
+        }
+        return null;
+    }
+EOF
+
+# 5.3 Add inline ghost text provider to SidebarProvider.ts
+cat >> src/SidebarProvider.ts << 'EOF'
+
+    // Inline ghost text (cursor-like) – simplified version
+    private registerGhostTextProvider() {
+        vscode.languages.registerHoverProvider('*', {
+            provideHover: async (document, position) => {
+                // Show AI suggestion on hover (can be extended)
+                return new vscode.Hover("💡 Codex: Press Ctrl+I to ask AI");
+            }
+        });
+    }
+EOF
+
+# 5.4 Update extension.ts to initialize new components
+if ! grep -q "ShadowWorkspace" src/extension.ts; then
+    cat >> src/extension.ts << 'EOF'
+
+    // Production-grade features initialization
+    import { ShadowWorkspace } from './speculative/ShadowWorkspace';
+    import { ModelRouter } from './orchestrator/ModelRouter';
+    import { DiffApplier } from './diff/DiffApplier';
+
+    const shadow = new ShadowWorkspace(workspaceRoot);
+    const diffApplier = new DiffApplier();
+    // Register speculative execution command
+    vscode.commands.registerCommand('codex-browser-agent.speculativeApply', async () => {
+        await shadow.create();
+        // run script in shadow, then show diff
+        const diff = await shadow.showDiff();
+        const accept = await vscode.window.showInformationMessage('Apply changes?', 'Yes', 'No');
+        if (accept === 'Yes') await shadow.accept();
+        await shadow.cleanup();
+    });
+EOF
+fi
+
+# 5.5 Add new commands to package.json
+if ! grep -q "codex-browser-agent.speculativeApply" package.json; then
+    # Use jq if available, else sed
+    if command -v jq &> /dev/null; then
+        jq '.contributes.commands += [
+            {"command": "codex-browser-agent.speculativeApply", "title": "Codex: Apply in Shadow Workspace"},
+            {"command": "codex-browser-agent.agentLoop", "title": "Codex: Start Autonomous Agent"}
+        ]' package.json > package.json.tmp && mv package.json.tmp package.json
+    else
+        echo "⚠️ jq not found; please manually add commands to package.json"
+    fi
+fi
+
+# ------------------------------------------------------------
+# 6. Final instructions
+# ------------------------------------------------------------
 echo ""
-echo "✅ Final fixes applied."
+echo "✅ Upgrade script completed!"
 echo ""
-echo "📁 Raw response will be saved to .codex-memory/raw_response.txt"
-echo "📋 Check the 'Codex Browser Agent' output channel for detailed parse logs."
+echo "Next steps:"
+echo "1. Run 'npm run compile' to build the extension."
+echo "2. Reload VS Code (or press F5 to launch debug instance)."
+echo "3. Test new features:"
+echo "   - Open sidebar, select files, click 'Sync & Get Response' – now uses autonomous agent loop."
+echo "   - Run command 'Codex: Start Autonomous Agent' from command palette."
+echo "   - Use 'Codex: Apply in Shadow Workspace' to test speculative execution."
+echo "4. For LSP and vector indexing, ensure your workspace has a valid language server (e.g., TypeScript, Python)."
+echo "5. To index your codebase for RAG, call vectorStore.indexFile() on each file (can be automated)."
 echo ""
-echo "Now restart (F5), run a sync, click Apply, then check:"
-echo "  - Output channel for '=== applyResponse START ===' and parse results"
-echo "  - .codex-memory/raw_response.txt for exact LLM output"
+echo "Refer to the generated modules in src/agent, src/lsp, src/vector, src/diff, src/speculative, src/orchestrator for customization."

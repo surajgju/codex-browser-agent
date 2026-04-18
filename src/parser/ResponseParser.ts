@@ -13,7 +13,7 @@ export class ResponseParser {
         }
 
         const fileChanges: FileBlock[] = [];
-        
+
         // Try multiple regex patterns
         const patterns = [
             /FILE:\s*([^\n\r]+)\s*\n([\s\S]*?)END_FILE/g,           // standard
@@ -45,7 +45,7 @@ export class ResponseParser {
                     const filePath = lines[i].replace('FILE:', '').trim().replace(/(Copy|Download).*$/i, '');
                     // Collect content until END_FILE or end of text
                     let contentLines = [];
-                    for (let j = i+1; j < lines.length; j++) {
+                    for (let j = i + 1; j < lines.length; j++) {
                         if (lines[j].trim() === 'END_FILE') break;
                         contentLines.push(lines[j]);
                     }
@@ -111,5 +111,42 @@ export class ResponseParser {
             cmds.push(match[1]);
         }
         return cmds;
+    }
+
+    static parseUnifiedDiff(text: string): string | null {
+        if (!text || typeof text !== 'string') return null;
+        
+        // Standard markdown extraction
+        const strictMatch = text.match(/```diff\s*\n([\s\S]*?)```/);
+        if (strictMatch) {
+            return strictMatch[1].trim();
+        }
+
+        // Fallback: If Playwright DOM squashes backticks, look for standard diff headers explicitly
+        // Assumes a unified diff starts with '--- ' and '+++ '
+        const squashedMatch = text.match(/(--- [^\n]+\n\+\+\+ [^\n]+\n@@[\s\S]*?)(?:\s*END_DIFF|$)/i);
+        if (squashedMatch) {
+            return squashedMatch[1].trim();
+        }
+
+        return null;
+    }
+
+    static parseASTPatch(text: string): { targetNode: string; newCode: string } | null {
+        if (!text || typeof text !== 'string') return null;
+
+        // Try standard markdown parsing
+        const strictMatch = text.match(/AST_PATCH:\s*([^\n]+)\s*\n```[\w]*\s*\n([\s\S]*?)```/i);
+        if (strictMatch) {
+            return { targetNode: strictMatch[1].trim(), newCode: strictMatch[2].trim() };
+        }
+
+        // Fallback: DOM squashed fences. Capture everything after the AST_PATCH node declaration.
+        const squashedMatch = text.match(/AST_PATCH:\s*([^\n]+)\s*\n([\s\S]*?)(?:\s*END_PATCH|$)/i);
+        if (squashedMatch) {
+            return { targetNode: squashedMatch[1].trim(), newCode: squashedMatch[2].trim() };
+        }
+
+        return null;
     }
 }

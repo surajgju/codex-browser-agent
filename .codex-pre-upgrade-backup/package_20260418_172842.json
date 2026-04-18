@@ -1,0 +1,114 @@
+{
+  "name": "codex-browser-agent",
+  "displayName": "Codex Browser Agent",
+  "description": "Semi-automatic coding agent using browser‑session reuse with ChatGPT, Gemini, Claude, Grok, DeepSeek",
+  "version": "0.1.0",
+  "publisher": "your-publisher-name",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "AI"],
+  "activationEvents": [
+    "onCommand:codex-browser-agent.openSidebar",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codex-browser-agent-sidebar",
+          "title": "Codex Agent",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codex-browser-agent-sidebar": [
+        {
+          "type": "webview",
+          "id": "codex-browser-agent-sidebar",
+          "name": "Codex Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codex-browser-agent.openSidebar",
+        "title": "Codex Agent: Open Sidebar"
+      },
+      {
+        "command": "codex-browser-agent.syncSelected",
+        "title": "Codex Agent: Sync Selected Files"
+      },
+      {
+        "command": "codex-browser-agent.applyResponse",
+        "title": "Codex Agent: Apply AI Response"
+      },
+      {
+        "command": "codex-browser-agent.runCommand",
+        "title": "Codex Agent: Run Suggested Command"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Browser Agent",
+      "properties": {
+        "codex-browser-agent.maxFilesPerBatch": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum number of files to include in one sync batch."
+        },
+        "codex-browser-agent.maxConcurrentBrowsers": {
+          "type": "number",
+          "default": 5,
+          "description": "Maximum concurrent browser sessions."
+        },
+        "codex-browser-agent.operationTimeout": {
+          "type": "number",
+          "default": 60,
+          "description": "Timeout in seconds for browser operations."
+        },
+        "codex-browser-agent.allowedCommands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Whitelist of allowed terminal commands (empty = prompt for every command)."
+        },
+        "codex-browser-agent.autoGitStage": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically stage changed files in Git (not recommended)."
+        },
+        "codex-browser-agent.showDiffBeforeApply": {
+          "type": "boolean",
+          "default": true,
+          "description": "Always show a diff preview before applying AI‑generated file changes."
+        },
+        "codex-browser-agent.browserPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a custom browser executable (e.g., Chrome). Leave empty to use system default."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}
