@@ -128,7 +128,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             <button id="sync-button">Sync & Get Response</button>
         </div>
         <div class="response-section">
-            <pre id="response-content"></pre>
+            <textarea id="response-content" spellcheck="false" placeholder="LLM response will appear here..."></textarea>
             <button id="apply-response">Apply Changes</button>
             <button id="run-command">Run Command</button>
         </div>

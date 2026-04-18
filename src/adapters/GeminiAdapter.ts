@@ -33,14 +33,32 @@ export class GeminiAdapter extends PlatformAdapter {
     async waitForResponse(): Promise<AIResponse> {
         Logger.info('Gemini: Waiting for response...');
         try {
-            await this.page.waitForSelector('[class*="loading"], [class*="generating"]', { state: 'detached', timeout: 120000 }).catch(() => {});
             await this.page.waitForSelector('.model-response-text, [class*="model-response"], .response-content', { timeout: 30000 });
-            await this.page.waitForTimeout(1000);
-            const responseText = await this.page.evaluate(() => {
-                const messages = document.querySelectorAll('.model-response-text, [class*="model-response"], .response-content');
-                return messages.length > 0 ? messages[messages.length - 1]?.textContent || '' : '';
-            });
-            Logger.info(`Gemini: Response captured (${responseText.length} chars).`);
+            
+            let lastLength = 0;
+            let stableTicks = 0;
+            let responseText = '';
+
+            for (let i = 0; i < 120; i++) {
+                await this.page.waitForTimeout(1000);
+                
+                responseText = await this.page.evaluate(() => {
+                    const messages = document.querySelectorAll('.model-response-text, [class*="model-response"], .response-content');
+                    return messages.length > 0 ? messages[messages.length - 1]?.textContent || '' : '';
+                });
+
+                if (responseText.length > 0 && responseText.length === lastLength) {
+                    stableTicks++;
+                    if (stableTicks >= 4) {
+                        break;
+                    }
+                } else {
+                    stableTicks = 0;
+                    lastLength = responseText.length;
+                }
+            }
+            
+            Logger.info(`Gemini: Response completely captured (${responseText.length} chars).`);
             return { content: responseText };
         } catch (e) {
             Logger.error(`Gemini response wait failed: ${e}`);

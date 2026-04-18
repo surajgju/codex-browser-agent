@@ -21,6 +21,8 @@ export function activate(context: vscode.ExtensionContext) {
     const syncEngine = new SyncEngine(config, errorHandler, storage);
     const commandRunner = new CommandRunner(config, errorHandler);
 
+    Logger.info("All engine singletons instantiated.");
+
     // Initialize workspace map on activation
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (workspaceFolder) {
@@ -46,15 +48,19 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(
         vscode.commands.registerCommand("codex-browser-agent.openSidebar", () => {
+            Logger.info("Command manually triggered: codex-browser-agent.openSidebar");
             vscode.commands.executeCommand("workbench.view.extension.codex-browser-agent-sidebar");
         }),
         vscode.commands.registerCommand("codex-browser-agent.syncSelected", async () => {
+            Logger.info("Command manually triggered: codex-browser-agent.syncSelected");
             await syncEngine.syncSelected();
         }),
         vscode.commands.registerCommand("codex-browser-agent.applyResponse", async (responseData: any) => {
+            Logger.info("Command manually triggered: codex-browser-agent.applyResponse");
             await syncEngine.applyResponse(responseData);
         }),
         vscode.commands.registerCommand("codex-browser-agent.runCommand", async (command: string) => {
+            Logger.info(`Command manually triggered: codex-browser-agent.runCommand (Command: ${command})`);
             await commandRunner.run(command);
         })
     );

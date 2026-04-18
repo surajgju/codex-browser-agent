@@ -82,6 +82,23 @@ export class ResponseParser {
             return fallbackMatch[1].trim();
         }
 
+        // DOM extraction fallback: Playwright 'textContent' strips backticks.
+        // Look for shebang which is a definitive start of the bash script.
+        const shebangIndex = text.indexOf('#!/bin/bash');
+        if (shebangIndex !== -1) {
+            Logger.info(`ResponseParser: Found shebang, extracting raw text`);
+            return text.substring(shebangIndex).trim();
+        }
+
+        // Extreme fallback: the whole text is probably the script, just strip UI artifacts
+        // from ChatGPT/DeepSeek like "bashCopyDownloadcat" -> "cat"
+        // We use (?:...)+ to match consecutive squashed artifact words.
+        let cleanedText = text.replace(/^(?:bash|copy|download|sh|javascript|html|css|json|typescript|python)+\s*/i, '').trim();
+        if (cleanedText) {
+            Logger.info(`ResponseParser: Falling back to treating entire cleaned text as bash script`);
+            return cleanedText;
+        }
+
         return null;
     }
 

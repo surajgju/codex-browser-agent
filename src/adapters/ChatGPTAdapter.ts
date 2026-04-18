@@ -52,14 +52,33 @@ export class ChatGPTAdapter extends PlatformAdapter {
     async waitForResponse(): Promise<AIResponse> {
         Logger.info('ChatGPT: Waiting for response...');
         try {
-            await this.page.waitForSelector('button[aria-label="Stop generating"], button:has-text("Stop")', { state: 'detached', timeout: 120000 }).catch(() => {});
-            await this.page.waitForSelector('[data-message-author-role="assistant"]', { timeout: 30000 });
-            await this.page.waitForTimeout(1000);
-            const responseText = await this.page.evaluate(() => {
-                const messages = document.querySelectorAll('[data-message-author-role="assistant"] .markdown');
-                return messages.length > 0 ? messages[messages.length - 1]?.textContent || '' : '';
-            });
-            Logger.info(`ChatGPT: Response captured (${responseText.length} chars).`);
+            // Wait for the assistant response element to appear
+            await this.page.waitForSelector('[data-message-author-role="assistant"] .markdown, [data-message-author-role="assistant"]', { timeout: 30000 });
+            
+            let lastLength = 0;
+            let stableTicks = 0;
+            let responseText = '';
+
+            for (let i = 0; i < 120; i++) {
+                await this.page.waitForTimeout(1000); // 1 second tick
+                
+                responseText = await this.page.evaluate(() => {
+                    const messages = document.querySelectorAll('[data-message-author-role="assistant"] .markdown, [data-message-author-role="assistant"]');
+                    return messages.length > 0 ? messages[messages.length - 1]?.textContent || '' : '';
+                });
+
+                if (responseText.length > 0 && responseText.length === lastLength) {
+                    stableTicks++;
+                    if (stableTicks >= 4) {
+                        break; // Text has stopped streaming
+                    }
+                } else {
+                    stableTicks = 0; // Reset if still growing
+                    lastLength = responseText.length;
+                }
+            }
+            
+            Logger.info(`ChatGPT: Response completely captured (${responseText.length} chars).`);
             return { content: responseText };
         } catch (e) {
             Logger.error(`ChatGPT response wait failed: ${e}`);

@@ -43,10 +43,21 @@ export class BrowserManager {
         Logger.info(`BrowserManager: Launching browser for ${platform} with user data dir ${userDataDir}`);
         const context = await chromium.launchPersistentContext(userDataDir, {
             headless: false,
-            executablePath: this.config.browserPath || undefined
+            executablePath: this.config.browserPath || undefined,
+            ignoreDefaultArgs: ['--enable-automation'],
+            args: [
+                '--disable-blink-features=AutomationControlled',
+                '--disable-infobars',
+                '--no-sandbox'
+            ]
         });
+
+        // Critical anti-bot stealth injections to bypass Cloudflare
+        await context.addInitScript("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})");
+        await context.addInitScript("window.navigator.chrome = { runtime: {} };");
+
         this.browsers.set(platform, { context });
-        Logger.info(`BrowserManager: Browser launched for ${platform}`);
+        Logger.info(`BrowserManager: Browser launched for ${platform} with stealth features enabled.`);
     }
     
     async closeAll() {

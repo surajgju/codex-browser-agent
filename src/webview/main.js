@@ -32,7 +32,7 @@
                 log('Config received');
                 break;
             case 'response':
-                responseContent.textContent = message.content;
+                responseContent.value = message.content;
                 log(`Response displayed (${message.content.length} chars)`);
                 break;
         }
@@ -56,7 +56,7 @@
     });
     
     document.getElementById('apply-response').addEventListener('click', () => {
-        const resp = responseContent.textContent;
+        const resp = responseContent.value;
         log(`Apply clicked, response length=${resp.length}`);
         vscode.postMessage({ command: 'applyResponse', response: resp });
     });
