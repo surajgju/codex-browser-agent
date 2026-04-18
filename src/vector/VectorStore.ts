@@ -1,36 +1,70 @@
-import { HierarchicalNSW } from 'hnswlib-node';
 import * as fs from 'fs';
 import * as path from 'path';
-import { pipeline } from '@xenova/transformers';
+import { Logger } from '../utils/logger';
 
+interface Chunk {
+    text: string;
+    filePath: string;
+    keywords: Set<string>;
+}
+
+/**
+ * VectorStore – pure TypeScript keyword-based retrieval.
+ * Replaces hnswlib-node + @xenova/transformers (native binaries)
+ * with a fast TF-IDF-style keyword scoring engine.
+ * No native compilation required.
+ */
 export class VectorStore {
-    private index: HierarchicalNSW | null = null;
-    private embedder: any;
-    private chunks: { text: string; filePath: string }[] = [];
+    private chunks: Chunk[] = [];
+    private indexedFiles = new Set<string>();
 
-    async initialize(dimension = 384) {
-        this.index = new HierarchicalNSW('cosine', dimension);
-        this.embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+    async initialize(): Promise<void> {
+        Logger.info('VectorStore: Initialized (pure TS keyword engine)');
     }
 
-    async indexFile(filePath: string, chunkSize = 500) {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const lines = content.split('\n');
-        for (let i = 0; i < lines.length; i += chunkSize) {
-            const chunk = lines.slice(i, i + chunkSize).join('\n');
-            const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
-            const id = this.chunks.length;
-            this.index!.addPoint(embedding.data, id);
-            this.chunks.push({ text: chunk, filePath });
+    async indexFile(filePath: string, chunkSize = 100): Promise<void> {
+        if (this.indexedFiles.has(filePath)) return;
+        try {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n');
+            for (let i = 0; i < lines.length; i += chunkSize) {
+                const chunk = lines.slice(i, i + chunkSize).join('\n');
+                this.chunks.push({
+                    text: chunk,
+                    filePath,
+                    keywords: this.extractKeywords(chunk)
+                });
+            }
+            this.indexedFiles.add(filePath);
+            Logger.info(`VectorStore: Indexed ${filePath}`);
+        } catch (err) {
+            Logger.warn(`VectorStore: Could not index ${filePath}: ${err}`);
         }
     }
 
     async search(query: string, k = 5): Promise<{ text: string; filePath: string; score: number }[]> {
-        const queryEmbedding = await this.embedder(query, { pooling: 'mean', normalize: true });
-        const result = this.index!.searchKnn(queryEmbedding.data, k);
-        return result.neighbors.map((id, idx) => ({
-            ...this.chunks[id],
-            score: result.distances[idx]
-        }));
+        const queryKw = this.extractKeywords(query);
+        const scored = this.chunks.map(chunk => {
+            let score = 0;
+            for (const kw of queryKw) {
+                if (chunk.keywords.has(kw)) score++;
+            }
+            return { ...chunk, score };
+        });
+
+        return scored
+            .filter(r => r.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, k)
+            .map(r => ({ text: r.text, filePath: r.filePath, score: r.score }));
+    }
+
+    private extractKeywords(text: string): Set<string> {
+        const stopWords = new Set(['the', 'a', 'is', 'in', 'it', 'of', 'to', 'and', 'for', 'with', 'that', 'this', 'from']);
+        const words = text
+            .toLowerCase()
+            .split(/[\s\W]+/)
+            .filter(w => w.length > 2 && !stopWords.has(w));
+        return new Set(words);
     }
 }

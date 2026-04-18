@@ -63,7 +63,7 @@ export class SyncEngine {
     }
 
     async syncToPlatform(platform: string, files: string[], prompt: string) {
-        Logger.info(`SyncEngine: Using autonomous agent loop for ${platform}`);
+        Logger.info(`SyncEngine: Starting sync to ${platform} with ${files.length} files`);
         try {
             const adapter = this.adapters.get(platform);
             if (!adapter) throw new Error(`No adapter for ${platform}`);
@@ -71,44 +71,84 @@ export class SyncEngine {
             const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
             const context = this.retrievalEngine.buildContext(prompt, workspaceRoot);
             const contextBlock = this.retrievalEngine.formatContextForPrompt(context);
-            
-            const augmentedPrompt = `${contextBlock}\n\n## User Request\n${prompt}`;
 
-            // Filter files intelligently before uploading to the browser
+            // 1. Intelligently filter files before uploading to the browser
             const relevantFiles = await this.selectRelevantFiles(files, prompt);
-            
-            // If no relevant files found but user selected many, ask user or limit
             if (relevantFiles.length === 0 && files.length > 0) {
                 const answer = await vscode.window.showWarningMessage(
                     `Could not automatically select relevant files from ${files.length}. Upload all?`,
                     'Yes, upload all', 'Cancel'
                 );
                 if (answer !== 'Yes, upload all') return;
-                relevantFiles.push(...files.slice(0, 10)); // Limit to safe number
+                relevantFiles.push(...files.slice(0, 10));
             }
 
-            Logger.info(`SyncEngine: Agent prompt augmented`);
+            // 2. Build augmented prompt with mandatory bash output instruction
+            const augmentedPrompt = `${contextBlock}
+
+## User Request
+${prompt}
+
+## Output Format (MANDATORY)
+Respond with a single bash script that applies ALL necessary changes.
+Wrap it in a standard markdown bash code block:
+\`\`\`bash
+# your script here, using: cat > path/to/file << 'EOF' ... EOF
+\`\`\`
+Do not explain. Only output the bash script block.`;
+
+            Logger.info(`SyncEngine: Prompt built, initializing adapter`);
+
+            // 3. Initialize adapter (reuses existing session if already initialized)
             if (!adapter.initialized) {
                 await adapter.initialize();
             }
-            
-            // Upload only the selected relevant files
-            await adapter.uploadFiles(relevantFiles);
-            
-            const agent = new AgentLoop(adapter, this.lspClient, this.vectorStore);
-            await agent.run(augmentedPrompt);
 
+            // 4. Upload relevant files and send prompt
+            await adapter.uploadFiles(relevantFiles);
+            await adapter.sendPrompt(augmentedPrompt);
+
+            // 5. Wait for the full streaming response
+            const response = await adapter.waitForResponse();
+            const responseContent = response?.content || '';
+            Logger.info(`SyncEngine: Response received (${responseContent.length} chars)`);
+
+            // 6. Push response to sidebar so user can preview + edit before applying
             if (this.sidebarPostMessage) {
-                this.sidebarPostMessage({ type: 'response', content: "[Agent loop completed. Check workspace/shadow directories.]" });
-                Logger.info('SyncEngine: Agent completion notification sent to sidebar');
+                this.sidebarPostMessage({ type: 'response', content: responseContent });
+                Logger.info('SyncEngine: Response sent to sidebar for preview');
+            } else {
+                Logger.warn('SyncEngine: No sidebar callback registered');
             }
 
             this.iterationTracker.track({
                 platform,
                 prompt,
-                files,
-                responseSummary: "Autonomous Agent Execution"
+                files: relevantFiles,
+                responseSummary: responseContent.substring(0, 200)
             });
+
+        } catch (error) {
+            Logger.error(`SyncEngine: Sync failed - ${error}`);
+            this.errorHandler.handle(error);
+        }
+    }
+
+    /**
+     * Autonomous agent mode – called explicitly via command palette.
+     * NOT used in the default sidebar sync flow.
+     */
+    async runAgentLoop(platform: string, prompt: string) {
+        Logger.info(`SyncEngine: Starting autonomous agent loop for ${platform}`);
+        try {
+            const adapter = this.adapters.get(platform);
+            if (!adapter) throw new Error(`No adapter for ${platform}`);
+            if (!adapter.initialized) { await adapter.initialize(); }
+            const agent = new AgentLoop(adapter, this.lspClient, this.vectorStore);
+            await agent.run(prompt);
+            if (this.sidebarPostMessage) {
+                this.sidebarPostMessage({ type: 'response', content: '[Agent loop completed. Check workspace for applied changes.]' });
+            }
         } catch (error) {
             Logger.error(`SyncEngine: Agent loop failed - ${error}`);
             this.errorHandler.handle(error);
