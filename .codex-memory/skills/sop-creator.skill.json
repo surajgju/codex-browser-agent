@@ -1,0 +1,10 @@
+{
+  "name": "sop-creator",
+  "description": "Create runbooks, playbooks, and technical documentation that people actually follow",
+  "triggerKeywords": ["sop", "runbook", "documentation", "process", "playbook", "checklist", "standard operating procedure"],
+  "promptTemplate": "Create an SOP for {process_name}. Follow the universal structure: Definition of Done, When to Use, Prerequisites, The Process (numbered steps), Verify Completion, When Things Go Wrong, Questions?. Be specific with numbers, names, thresholds. Use action-first steps and put warnings before dangerous steps.",
+  "contextTemplate": "Existing documentation: {existing_docs}\nWorkspace structure: {workspace_tree}",
+  "postActions": [
+    { "type": "prompt", "value": "Review the SOP for clarity and ensure all placeholders are filled with concrete values." }
+  ]
+}

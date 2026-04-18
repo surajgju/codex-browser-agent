@@ -1,0 +1,10 @@
+{
+  "name": "skill-creator",
+  "description": "Guide for creating effective skills that extend Claude's capabilities",
+  "triggerKeywords": ["create skill", "new skill", "skill development", "extend claude"],
+  "promptTemplate": "Help me create a new skill for {purpose}. Follow the skill anatomy: SKILL.md with YAML frontmatter (name, description) and Markdown instructions. Bundle optional scripts/, references/, assets/. Only add context Claude doesn't already have. Use progressive disclosure.",
+  "contextTemplate": "Existing skills: {skills_list}\nSkill template: .claude/skills/template/",
+  "postActions": [
+    { "type": "command", "value": "python .claude/skills/skill-creator/scripts/init_skill.py {skill_name}" }
+  ]
+}

@@ -1,0 +1,208 @@
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Config } from '../utils/config';
+import { ErrorHandler } from '../utils/errorHandler';
+import { StorageHelper } from '../utils/storage';
+import { BrowserManager } from '../browser/BrowserManager';
+import { ChatGPTAdapter } from '../adapters/ChatGPTAdapter';
+import { GeminiAdapter } from '../adapters/GeminiAdapter';
+import { ClaudeAdapter } from '../adapters/ClaudeAdapter';
+import { GrokAdapter } from '../adapters/GrokAdapter';
+import { DeepSeekAdapter } from '../adapters/DeepSeekAdapter';
+import { PlatformAdapter } from '../browser/PlatformAdapter';
+import { UnifiedDiffParser } from '../parser/UnifiedDiffParser';
+import { ResponseParser } from '../parser/ResponseParser';
+import { RetrievalEngine } from '../memory/RetrievalEngine';
+import { IterationTracker } from '../memory/IterationTracker';
+import { Logger } from '../utils/logger';
+
+export class SyncEngine {
+    private browserManager: BrowserManager;
+    private adapters: Map<string, PlatformAdapter> = new Map();
+    private retrievalEngine: RetrievalEngine;
+    private iterationTracker: IterationTracker;
+    private sidebarPostMessage?: (message: any) => void;
+
+    constructor(
+        private config: Config,
+        private errorHandler: ErrorHandler,
+        private storage: StorageHelper
+    ) {
+        this.browserManager = BrowserManager.getInstance(config);
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        this.retrievalEngine = new RetrievalEngine(workspaceFolder);
+        this.iterationTracker = new IterationTracker(workspaceFolder);
+        this.registerAdapters();
+    }
+
+    private registerAdapters() {
+        this.adapters.set('chatgpt', new ChatGPTAdapter(this.browserManager));
+        this.adapters.set('gemini', new GeminiAdapter(this.browserManager));
+        this.adapters.set('claude', new ClaudeAdapter(this.browserManager));
+        this.adapters.set('grok', new GrokAdapter(this.browserManager));
+        this.adapters.set('deepseek', new DeepSeekAdapter(this.browserManager));
+    }
+
+    setSidebarPostMessage(callback: (message: any) => void) {
+        this.sidebarPostMessage = callback;
+        Logger.info('SyncEngine: Sidebar callback registered');
+    }
+
+    async syncSelected() {
+        vscode.window.showInformationMessage('Sync initiated from command palette');
+    }
+
+    async syncToPlatform(platform: string, files: string[], prompt: string) {
+        Logger.info(`SyncEngine: Starting sync to ${platform} with ${files.length} files`);
+        try {
+            const adapter = this.adapters.get(platform);
+            if (!adapter) throw new Error(`No adapter for ${platform}`);
+
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+            const context = this.retrievalEngine.buildContext(prompt, workspaceRoot);
+            const contextBlock = this.retrievalEngine.formatContextForPrompt(context);
+            
+            // 🔥 STRICT FORMAT INSTRUCTION
+            const augmentedPrompt = `${contextBlock}
+
+## User Request
+${prompt}
+
+## Output Format (MANDATORY)
+You MUST respond with EXACTLY the following format for any file changes:
+
+\`\`\`
+FILE: path/to/file.ext
+<entire file content>
+END_FILE
+\`\`\`
+
+Do not add extra text before or after the FILE block. Do not use markdown code fences inside the FILE block. The FILE: line must be exactly "FILE: " followed by the relative file path.`;
+
+            Logger.info(`SyncEngine: Prompt augmented, context tokens ~${context.tokenEstimate}`);
+
+            await adapter.initialize();
+            await adapter.uploadFiles(files);
+            await adapter.sendPrompt(augmentedPrompt);
+            
+            const response = await adapter.waitForResponse();
+            const responseContent = response?.content || '';
+            Logger.info(`SyncEngine: Response received (${responseContent.length} chars)`);
+            
+            if (this.sidebarPostMessage) {
+                this.sidebarPostMessage({ type: 'response', content: responseContent });
+                Logger.info('SyncEngine: Response sent to sidebar');
+            } else {
+                Logger.warn('SyncEngine: No sidebar callback, response not displayed');
+            }
+
+            this.iterationTracker.track({
+                platform,
+                prompt,
+                files,
+                responseSummary: responseContent.substring(0, 200)
+            });
+        } catch (error) {
+            Logger.error(`SyncEngine: Sync failed - ${error}`);
+            this.errorHandler.handle(error);
+        }
+    }
+
+    async applyResponse(responseData: any) {
+        Logger.info(`SyncEngine: applyResponse called`);
+        let responseText = '';
+        if (typeof responseData === 'string') {
+            responseText = responseData;
+        } else if (responseData && typeof responseData.content === 'string') {
+            responseText = responseData.content;
+        } else {
+            Logger.error('SyncEngine: Invalid response data');
+            vscode.window.showErrorMessage('Invalid response data');
+            return;
+        }
+
+        if (!responseText.trim()) {
+            vscode.window.showWarningMessage('AI response is empty.');
+            return;
+        }
+
+        Logger.info(`SyncEngine: Response text length ${responseText.length}`);
+        Logger.info(`SyncEngine: Response preview: ${responseText.substring(0, 300)}`);
+
+        let parsedChanges = ResponseParser.parseFILEBlocks(responseText).map(f => ({ filePath: f.path, content: f.content }));
+        Logger.info(`SyncEngine: FILE blocks parsed: ${parsedChanges.length}`);
+
+        if (parsedChanges.length === 0) {
+            // Fallback: try to extract content between code fences
+            const codeFenceMatch = responseText.match(/```(?:html|css|js|ts|json)?\s*([\s\S]*?)```/i);
+            if (codeFenceMatch) {
+                const guessedPath = 'sample.html'; // or infer from file list
+                parsedChanges = [{ filePath: guessedPath, content: codeFenceMatch[1].trim() }];
+                Logger.info(`SyncEngine: Extracted code fence content, using default path ${guessedPath}`);
+            }
+        }
+
+        if (parsedChanges.length === 0) {
+            parsedChanges = UnifiedDiffParser.parse(responseText);
+            Logger.info(`SyncEngine: Unified diff parsed: ${parsedChanges.length}`);
+        }
+
+        if (parsedChanges.length === 0) {
+            vscode.window.showWarningMessage('No file changes detected.');
+            const memPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '.', '.codex-memory');
+            if (!fs.existsSync(memPath)) fs.mkdirSync(memPath, { recursive: true });
+            fs.writeFileSync(path.join(memPath, 'last_response.txt'), responseText);
+            Logger.info(`SyncEngine: Full response saved to .codex-memory/last_response.txt`);
+            return;
+        }
+
+        if (this.config.showDiffBeforeApply) {
+            const choice = await vscode.window.showInformationMessage(
+                `Apply changes to ${parsedChanges.length} file(s)?`,
+                { modal: true },
+                'Yes', 'Show Diff', 'No'
+            );
+            if (choice === 'Show Diff') {
+                const first = parsedChanges[0];
+                const originalUri = vscode.Uri.file(first.filePath);
+                const modifiedUri = vscode.Uri.parse(`untitled:${path.basename(first.filePath)}.modified`);
+                await vscode.workspace.fs.writeFile(modifiedUri, Buffer.from(first.content));
+                await vscode.commands.executeCommand('vscode.diff', originalUri, modifiedUri, `${first.filePath} (AI Suggested)`);
+                return;
+            } else if (choice !== 'Yes') {
+                return;
+            }
+        }
+
+        let appliedCount = 0;
+        for (const file of parsedChanges) {
+            try {
+                const uri = vscode.Uri.file(file.filePath);
+                const dir = path.dirname(file.filePath);
+                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                await vscode.workspace.fs.writeFile(uri, Buffer.from(file.content));
+                appliedCount++;
+                Logger.info(`SyncEngine: Wrote file ${file.filePath}`);
+            } catch (e) {
+                Logger.error(`SyncEngine: Failed to write ${file.filePath} - ${e}`);
+            }
+        }
+
+        const commands = ResponseParser.parseCommands(responseText);
+        if (commands.length > 0) {
+            const run = await vscode.window.showInformationMessage(`Run suggested commands?`, 'Yes', 'No');
+            if (run === 'Yes') {
+                const terminal = vscode.window.createTerminal('Codex Agent');
+                terminal.show();
+                commands.forEach(cmd => terminal.sendText(cmd));
+            }
+        }
+
+        vscode.window.showInformationMessage(`✅ Applied changes to ${appliedCount} file(s).`);
+    }
+
+    dispose() {
+        this.browserManager.closeAll();
+    }
+}

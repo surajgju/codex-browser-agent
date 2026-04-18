@@ -1,0 +1,25 @@
+import { PlatformAdapter, AIResponse } from '../browser/PlatformAdapter';
+
+export class GeminiAdapter extends PlatformAdapter {
+    constructor(browserManager: any) { super('gemini', browserManager); }
+    async ensureLoggedIn(): Promise<void> {
+        await this.page.goto('https://gemini.google.com');
+        await this.page.waitForSelector('textarea, [contenteditable="true"]', { timeout: 0 });
+    }
+    async uploadFiles(filePaths: string[]): Promise<void> {
+        // Gemini may support file upload; otherwise fallback to pasting
+        const content = filePaths.map(p => `${p}:\n${require('fs').readFileSync(p, 'utf8')}`).join('\n');
+        const input = await this.page.$('textarea, [contenteditable="true"]');
+        await input?.fill(content);
+    }
+    async sendPrompt(prompt: string): Promise<void> {
+        const input = await this.page.$('textarea, [contenteditable="true"]');
+        await input?.fill(prompt);
+        await this.page.keyboard.press('Enter');
+    }
+    async waitForResponse(): Promise<AIResponse> {
+        await this.page.waitForSelector('.response-content', { timeout: 60000 });
+        const content = await this.page.$eval('.response-content', el => el.textContent) || '';
+        return { content };
+    }
+}

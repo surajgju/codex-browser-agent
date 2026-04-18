@@ -1,0 +1,10 @@
+{
+  "name": "mcp-client",
+  "description": "Connect to external MCP servers (Zapier, GitHub, etc.) with progressive disclosure",
+  "triggerKeywords": ["mcp", "zapier", "model context protocol", "connect server", "mcp tools"],
+  "promptTemplate": "Configure MCP client to connect to {server_name}. Use the example config at references/example-mcp-config.json. List available tools and document any gotchas in CLAUDE.md.",
+  "contextTemplate": "Current MCP config: {mcp_config}\nAvailable servers: {servers}",
+  "postActions": [
+    { "type": "prompt", "value": "Test the MCP server tools and update CLAUDE.md with any quirks or required argument formats." }
+  ]
+}

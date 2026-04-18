@@ -1,0 +1,63 @@
+import { PlatformAdapter, AIResponse } from '../browser/PlatformAdapter';
+import { Logger } from '../utils/logger';
+
+export class DeepSeekAdapter extends PlatformAdapter {
+    constructor(browserManager: any) { super('deepseek', browserManager); }
+
+    async ensureLoggedIn(): Promise<void> {
+        await this.page.goto('https://chat.deepseek.com');
+        await this.page.waitForSelector('textarea, [contenteditable="true"]', { timeout: 0 });
+    }
+
+    async uploadFiles(filePaths: string[]): Promise<void> {
+        const fs = require('fs');
+        const content = filePaths.map(p => `FILE: ${p}\n\`\`\`\n${fs.readFileSync(p, 'utf8')}\n\`\`\``).join('\n\n');
+        const input = await this.page.$('textarea, [contenteditable="true"]');
+        await input?.fill(content);
+    }
+
+    async sendPrompt(prompt: string): Promise<void> {
+        const input = await this.page.$('textarea, [contenteditable="true"]');
+        await input?.fill(prompt);
+        await this.page.keyboard.press('Enter');
+    }
+
+    async waitForResponse(): Promise<AIResponse> {
+        Logger.info('DeepSeek: Waiting for response...');
+        
+        // Strategy: Wait for the assistant's turn to finish and the last message to appear.
+        // Instead of a brittle class name, we use a functional locator.
+        try {
+            // First, wait for the "stop" button to disappear, indicating the AI is done "thinking".
+            await this.page.waitForSelector('.ds-icon-button', { state: 'detached', timeout: 90000 }).catch(() => {
+                Logger.warn('DeepSeek: "Stop" button not found or already gone. Continuing...');
+            });
+
+            // Next, wait for the actual markdown content to appear.
+            // This selector targets the last message in the conversation.
+            await this.page.waitForSelector('.ds-markdown p, .ds-markdown pre, .ds-markdown', { timeout: 15000 });
+            
+            // Give the page a tiny moment for any final rendering.
+            await this.page.waitForTimeout(2000);
+
+        } catch (e) {
+            Logger.warn(`DeepSeek: Initial wait strategy failed, falling back to generic wait. Error: ${e}`);
+            await this.page.waitForTimeout(15000); // Fallback: just wait 15 seconds
+        }
+
+        // Extract the full response from the last assistant message.
+        const responseText = await this.page.evaluate(() => {
+            // Find all assistant message containers.
+            // DeepSeek uses elements with the class 'ds-markdown' for the final rendered markdown.
+            const messages = document.querySelectorAll('.ds-markdown');
+            if (messages.length > 0) {
+                // Return the content of the *last* assistant message.
+                return messages[messages.length - 1]?.textContent || '';
+            }
+            return '';
+        });
+
+        Logger.info(`DeepSeek: Response captured (${responseText.length} chars).`);
+        return { content: responseText || '' };
+    }
+}

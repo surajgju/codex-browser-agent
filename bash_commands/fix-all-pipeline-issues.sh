@@ -1,0 +1,367 @@
+#!/bin/bash
+set -e
+
+echo "🔧 Applying confirmed pipeline fixes to Codex Browser Agent..."
+
+# Backup files
+cp src/adapters/ChatGPTAdapter.ts src/adapters/ChatGPTAdapter.ts.backup
+cp src/sync/SyncEngine.ts src/sync/SyncEngine.ts.backup
+cp src/browser/BrowserManager.ts src/browser/BrowserManager.ts.backup
+
+# ------------------------------------------------------------------
+# 1. Fix ChatGPTAdapter – correct selectors and file upload logic
+# ------------------------------------------------------------------
+cat > src/adapters/ChatGPTAdapter.ts << 'EOF'
+import { PlatformAdapter, AIResponse } from '../browser/PlatformAdapter';
+import { Logger } from '../utils/logger';
+
+export class ChatGPTAdapter extends PlatformAdapter {
+    constructor(browserManager: any) { super('chatgpt', browserManager); }
+
+    async ensureLoggedIn(): Promise<void> {
+        await this.page.goto('https://chat.openai.com', { waitUntil: 'domcontentloaded' });
+        try {
+            await this.page.waitForSelector('textarea[placeholder*="Message"], [contenteditable="true"]', { timeout: 5000 });
+        } catch {
+            Logger.warn('ChatGPT not logged in. Please log in manually.');
+            await this.page.waitForSelector('textarea[placeholder*="Message"], [contenteditable="true"]', { timeout: 0 });
+        }
+        Logger.info('ChatGPT: Logged in.');
+    }
+
+    async uploadFiles(filePaths: string[]): Promise<void> {
+        const attachButton = await this.page.$('button[aria-label="Attach files"], button[aria-label*="attach" i]');
+        if (attachButton) {
+            await attachButton.click();
+            const fileInput = await this.page.$('input[type="file"]');
+            if (fileInput) {
+                await fileInput.setInputFiles(filePaths);
+                await this.page.waitForTimeout(2000); // Wait for upload to complete
+            }
+        } else {
+            // Fallback: paste content but DO NOT overwrite the textarea – we'll append prompt later
+            const fs = require('fs');
+            const contents = filePaths.map(p => `FILE: ${p}\n\`\`\`\n${fs.readFileSync(p, 'utf8')}\n\`\`\``).join('\n\n');
+            const textarea = await this.page.$('textarea, [contenteditable="true"]');
+            if (textarea) {
+                await textarea.fill(contents);
+                // Store that we already filled the textarea so sendPrompt doesn't overwrite
+                (this as any)._hasUploadedViaFallback = true;
+            }
+        }
+    }
+
+    async sendPrompt(prompt: string): Promise<void> {
+        const textarea = await this.page.$('textarea, [contenteditable="true"]');
+        if (!textarea) return;
+
+        // If we already filled the textarea with file content, append the prompt
+        if ((this as any)._hasUploadedViaFallback) {
+            await textarea.type('\n\n' + prompt);
+            (this as any)._hasUploadedViaFallback = false;
+        } else {
+            await textarea.fill(prompt);
+        }
+        await this.page.keyboard.press('Enter');
+    }
+
+    async waitForResponse(): Promise<AIResponse> {
+        Logger.info('ChatGPT: Waiting for response...');
+
+        // Wait for generation to finish (stop button disappears)
+        try {
+            await this.page.waitForSelector('button[aria-label="Stop generating"], button:has-text("Stop")', { state: 'detached', timeout: 120000 });
+        } catch {
+            Logger.warn('ChatGPT: Stop button not found or already gone.');
+        }
+
+        // Wait for the assistant message to appear
+        await this.page.waitForSelector('[data-message-author-role="assistant"]', { timeout: 30000 });
+        await this.page.waitForTimeout(1000);
+
+        // Extract the LAST assistant message (not the first .markdown)
+        const responseText = await this.page.evaluate(() => {
+            const messages = document.querySelectorAll('[data-message-author-role="assistant"] .markdown');
+            if (messages.length === 0) return '';
+            return messages[messages.length - 1]?.textContent || '';
+        });
+
+        Logger.info(`ChatGPT: Response captured (${responseText.length} chars).`);
+        return { content: responseText || '' };
+    }
+}
+EOF
+
+# ------------------------------------------------------------------
+# 2. Fix SyncEngine – use FILE block prompt and correct sidebar fallback
+# ------------------------------------------------------------------
+cat > src/sync/SyncEngine.ts << 'EOF'
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Config } from '../utils/config';
+import { ErrorHandler } from '../utils/errorHandler';
+import { StorageHelper } from '../utils/storage';
+import { BrowserManager } from '../browser/BrowserManager';
+import { ChatGPTAdapter } from '../adapters/ChatGPTAdapter';
+import { GeminiAdapter } from '../adapters/GeminiAdapter';
+import { ClaudeAdapter } from '../adapters/ClaudeAdapter';
+import { GrokAdapter } from '../adapters/GrokAdapter';
+import { DeepSeekAdapter } from '../adapters/DeepSeekAdapter';
+import { PlatformAdapter } from '../browser/PlatformAdapter';
+import { UnifiedDiffParser } from '../parser/UnifiedDiffParser';
+import { ResponseParser } from '../parser/ResponseParser';
+import { RetrievalEngine } from '../memory/RetrievalEngine';
+import { IterationTracker } from '../memory/IterationTracker';
+import { Logger } from '../utils/logger';
+
+export class SyncEngine {
+    private browserManager: BrowserManager;
+    private adapters: Map<string, PlatformAdapter> = new Map();
+    private retrievalEngine: RetrievalEngine;
+    private iterationTracker: IterationTracker;
+    private sidebarPostMessage?: (message: any) => void;
+
+    constructor(
+        private config: Config,
+        private errorHandler: ErrorHandler,
+        private storage: StorageHelper
+    ) {
+        this.browserManager = BrowserManager.getInstance(config);
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        this.retrievalEngine = new RetrievalEngine(workspaceFolder);
+        this.iterationTracker = new IterationTracker(workspaceFolder);
+        this.registerAdapters();
+    }
+
+    private registerAdapters() {
+        this.adapters.set('chatgpt', new ChatGPTAdapter(this.browserManager));
+        this.adapters.set('gemini', new GeminiAdapter(this.browserManager));
+        this.adapters.set('claude', new ClaudeAdapter(this.browserManager));
+        this.adapters.set('grok', new GrokAdapter(this.browserManager));
+        this.adapters.set('deepseek', new DeepSeekAdapter(this.browserManager));
+    }
+
+    setSidebarPostMessage(callback: (message: any) => void) {
+        this.sidebarPostMessage = callback;
+    }
+
+    async syncSelected() {
+        vscode.window.showInformationMessage('Sync initiated from command palette');
+    }
+
+    async syncToPlatform(platform: string, files: string[], prompt: string) {
+        try {
+            const adapter = this.adapters.get(platform);
+            if (!adapter) throw new Error(`No adapter for ${platform}`);
+
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+
+            const context = this.retrievalEngine.buildContext(prompt, workspaceRoot);
+            const contextBlock = this.retrievalEngine.formatContextForPrompt(context);
+            
+            // 💡 Instruct LLM to use FILE blocks (more reliable parsing)
+            const augmentedPrompt = `${contextBlock}\n\n## User Request\n${prompt}\n\nRespond using FILE blocks for any code changes:\nFILE: path/to/file\n<complete new file content>\nEND_FILE`;
+
+            Logger.info(`Sync to ${platform} with ${files.length} files, context tokens ~${context.tokenEstimate}`);
+
+            await adapter.initialize();
+            await adapter.uploadFiles(files);
+            await adapter.sendPrompt(augmentedPrompt);
+            
+            const response = await adapter.waitForResponse();
+            
+            const responseContent = response?.content || '';
+            Logger.info(`Response received (${responseContent.length} chars).`);
+            
+            if (this.sidebarPostMessage) {
+                this.sidebarPostMessage({ type: 'response', content: responseContent });
+            } else {
+                // ✅ Do NOT auto-apply – just log and store for later
+                Logger.warn('Sidebar callback not ready yet. Response stored but not auto-applied.');
+                // Optionally, we could queue it, but for now we rely on the user clicking Apply from sidebar
+            }
+
+            this.iterationTracker.track({
+                platform,
+                prompt,
+                files,
+                responseSummary: responseContent.substring(0, 200)
+            });
+
+        } catch (error) {
+            this.errorHandler.handle(error);
+        }
+    }
+
+    async applyResponse(responseData: any) {
+        Logger.info(`applyResponse called with data type: ${typeof responseData}`);
+        
+        let responseText = '';
+        if (typeof responseData === 'string') {
+            responseText = responseData;
+        } else if (responseData && typeof responseData.content === 'string') {
+            responseText = responseData.content;
+        } else {
+            Logger.error('applyResponse received invalid data: ' + JSON.stringify(responseData));
+            vscode.window.showErrorMessage('Invalid response data received from AI.');
+            return;
+        }
+
+        if (!responseText.trim()) {
+            vscode.window.showWarningMessage('AI response is empty.');
+            return;
+        }
+
+        // Prefer FILE block parsing (more reliable)
+        let parsedChanges = ResponseParser.parseFILEBlocks(responseText)
+            .map(f => ({ filePath: f.path, content: f.content }));
+
+        // Fallback to unified diff if no FILE blocks
+        if (parsedChanges.length === 0) {
+            parsedChanges = UnifiedDiffParser.parse(responseText);
+        }
+
+        if (parsedChanges.length === 0) {
+            vscode.window.showWarningMessage('No file changes detected in AI response.');
+            Logger.info('Parsed 0 changes. Saving response to .codex-memory/last_response.txt for debugging.');
+            const memPath = path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '.', '.codex-memory');
+            if (!fs.existsSync(memPath)) fs.mkdirSync(memPath, { recursive: true });
+            fs.writeFileSync(path.join(memPath, 'last_response.txt'), responseText);
+            return;
+        }
+
+        Logger.info(`Parsed ${parsedChanges.length} file change(s).`);
+
+        if (this.config.showDiffBeforeApply) {
+            const choice = await vscode.window.showInformationMessage(
+                `Apply changes to ${parsedChanges.length} file(s)?`,
+                { modal: true },
+                'Yes', 'Show Diff', 'No'
+            );
+            if (choice === 'Show Diff') {
+                const first = parsedChanges[0];
+                const originalUri = vscode.Uri.file(first.filePath);
+                // ✅ Preserve file extension for syntax highlighting
+                const modifiedUri = vscode.Uri.parse(`untitled:${path.basename(first.filePath)}.modified`);
+                await vscode.workspace.fs.writeFile(modifiedUri, Buffer.from(first.content));
+                await vscode.commands.executeCommand('vscode.diff', originalUri, modifiedUri, `${first.filePath} (AI Suggested)`);
+                return;
+            } else if (choice !== 'Yes') {
+                return;
+            }
+        }
+
+        const applied: { file: string; snippet: string }[] = [];
+        for (const file of parsedChanges) {
+            const uri = vscode.Uri.file(file.filePath);
+            try {
+                const dir = path.dirname(file.filePath);
+                if (!fs.existsSync(dir)) {
+                    fs.mkdirSync(dir, { recursive: true });
+                }
+                await vscode.workspace.fs.writeFile(uri, Buffer.from(file.content));
+                applied.push({ file: file.filePath, snippet: file.content.substring(0, 100) });
+            } catch (e) {
+                Logger.error(`Failed to write ${file.filePath}: ${e}`);
+            }
+        }
+
+        const commands = ResponseParser.parseCommands(responseText);
+        if (commands.length > 0) {
+            const run = await vscode.window.showInformationMessage(`Run suggested commands?`, 'Yes', 'No');
+            if (run === 'Yes') {
+                const terminal = vscode.window.createTerminal('Codex Agent');
+                terminal.show();
+                commands.forEach(cmd => terminal.sendText(cmd));
+            }
+        }
+
+        vscode.window.showInformationMessage(`✅ Applied changes to ${applied.length} file(s).`);
+    }
+
+    dispose() {
+        this.browserManager.closeAll();
+    }
+}
+EOF
+
+# ------------------------------------------------------------------
+# 3. Fix BrowserManager – remove problematic remote-debugging-port flag
+# ------------------------------------------------------------------
+cat > src/browser/BrowserManager.ts << 'EOF'
+import { chromium, BrowserContext, Page } from 'playwright';
+import * as vscode from 'vscode';
+import * as path from 'path';
+import { Logger } from '../utils/logger';
+import { Config } from '../utils/config';
+
+export class BrowserManager {
+    private static instance: BrowserManager;
+    private browsers: Map<string, { context: BrowserContext }> = new Map();
+    private storageBasePath: string;
+    
+    private constructor(private config: Config) {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        this.storageBasePath = workspaceFolder 
+            ? path.join(workspaceFolder.uri.fsPath, '.codex-browser-data')
+            : path.join(require('os').tmpdir(), 'codex-browser-data');
+    }
+    
+    static getInstance(config: Config): BrowserManager {
+        if (!BrowserManager.instance) {
+            BrowserManager.instance = new BrowserManager(config);
+        }
+        return BrowserManager.instance;
+    }
+    
+    async getPage(platform: string): Promise<Page> {
+        if (!this.browsers.has(platform)) {
+            await this.launchBrowser(platform);
+        }
+        const { context } = this.browsers.get(platform)!;
+        const pages = context.pages();
+        if (pages.length > 0) {
+            return pages[0];
+        }
+        return await context.newPage();
+    }
+    
+    private async launchBrowser(platform: string) {
+        const userDataDir = path.join(this.storageBasePath, platform);
+        // ✅ Removed '--remote-debugging-port=9222' to avoid session collisions
+        const context = await chromium.launchPersistentContext(userDataDir, {
+            headless: false,
+            executablePath: this.config.browserPath || undefined
+        });
+        
+        this.browsers.set(platform, { context });
+        Logger.info(`Browser launched for ${platform}`);
+    }
+    
+    async closeAll() {
+        for (const [platform, { context }] of this.browsers) {
+            await context.close();
+        }
+        this.browsers.clear();
+    }
+}
+EOF
+
+# ------------------------------------------------------------------
+# 4. Recompile
+# ------------------------------------------------------------------
+npm run compile
+
+echo ""
+echo "✅ All pipeline issues fixed!"
+echo ""
+echo "Changes made:"
+echo "✔ ChatGPTAdapter: Correct assistant message selector + proper file/prompt append"
+echo "✔ SyncEngine: Switched prompt to FILE block format (reliable parsing)"
+echo "✔ SyncEngine: Removed auto-apply fallback – preserves UX flow"
+echo "✔ SyncEngine: Diff preview preserves file extension"
+echo "✔ BrowserManager: Removed --remote-debugging-port flag"
+echo ""
+echo "Now restart the extension host (F5) and test the full flow:"
+echo "Select files → Sync → Response appears → Apply Changes → Files updated."

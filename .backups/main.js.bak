@@ -1,0 +1,57 @@
+(function() {
+    const vscode = acquireVsCodeApi();
+    const oldState = vscode.getState() || { files: [] };
+    
+    const fileListEl = document.getElementById('file-list');
+    const selectBtn = document.getElementById('select-files');
+    const syncBtn = document.getElementById('sync-button');
+    const platformSelect = document.getElementById('platform-select');
+    const promptInput = document.getElementById('prompt-input');
+    const responseContent = document.getElementById('response-content');
+    
+    function renderFiles() {
+        fileListEl.innerHTML = oldState.files.map(f => `<li>${f}</li>`).join('');
+    }
+    renderFiles();
+    
+    window.addEventListener('message', event => {
+        const message = event.data;
+        switch (message.type) {
+            case 'contextUpdate':
+                oldState.files = message.files;
+                vscode.setState(oldState);
+                renderFiles();
+                break;
+            case 'config':
+                // store if needed
+                break;
+            case 'response':
+                responseContent.textContent = message.content;
+                break;
+        }
+    });
+    
+    selectBtn.addEventListener('click', () => {
+        vscode.postMessage({ command: 'selectFiles' });
+    });
+    
+    syncBtn.addEventListener('click', () => {
+        const platform = platformSelect.value;
+        const prompt = promptInput.value;
+        vscode.postMessage({
+            command: 'syncToAI',
+            platform,
+            files: oldState.files,
+            prompt
+        });
+    });
+    
+    document.getElementById('apply-response').addEventListener('click', () => {
+        vscode.postMessage({ command: 'applyResponse', response: responseContent.textContent });
+    });
+    
+    document.getElementById('run-command').addEventListener('click', () => {
+        const cmd = prompt('Enter command to run:');
+        if (cmd) vscode.postMessage({ command: 'runCommand', command: cmd });
+    });
+})();

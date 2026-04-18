@@ -1,0 +1,10 @@
+{
+  "name": "remotion-video-creator",
+  "description": "Create programmatic videos using React with Remotion",
+  "triggerKeywords": ["remotion", "video", "animation", "react video", "mp4", "composition"],
+  "promptTemplate": "Create a Remotion video with {description}. Use the Remotion project at {project_path}. Focus on one composition at a time. Include animations, text effects, and assets as needed.",
+  "contextTemplate": "Remotion project structure: {project_tree}\nAvailable components: {components}",
+  "postActions": [
+    { "type": "command", "value": "cd {project_path} && npm run dev" }
+  ]
+}

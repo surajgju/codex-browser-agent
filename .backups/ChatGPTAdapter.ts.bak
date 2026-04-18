@@ -1,0 +1,78 @@
+import { PlatformAdapter, AIResponse } from '../browser/PlatformAdapter';
+import { Logger } from '../utils/logger';
+
+export class ChatGPTAdapter extends PlatformAdapter {
+    constructor(browserManager: any) { super('chatgpt', browserManager); }
+
+    async ensureLoggedIn(): Promise<void> {
+        await this.page.goto('https://chat.openai.com', { waitUntil: 'domcontentloaded' });
+        try {
+            await this.page.waitForSelector('textarea[placeholder*="Message"], [contenteditable="true"]', { timeout: 5000 });
+        } catch {
+            Logger.warn('ChatGPT not logged in. Please log in manually.');
+            await this.page.waitForSelector('textarea[placeholder*="Message"], [contenteditable="true"]', { timeout: 0 });
+        }
+        Logger.info('ChatGPT: Logged in.');
+    }
+
+    async uploadFiles(filePaths: string[]): Promise<void> {
+        const attachButton = await this.page.$('button[aria-label="Attach files"], button[aria-label*="attach" i]');
+        if (attachButton) {
+            await attachButton.click();
+            const fileInput = await this.page.$('input[type="file"]');
+            if (fileInput) {
+                await fileInput.setInputFiles(filePaths);
+                await this.page.waitForTimeout(2000); // Wait for upload to complete
+            }
+        } else {
+            // Fallback: paste content but DO NOT overwrite the textarea – we'll append prompt later
+            const fs = require('fs');
+            const contents = filePaths.map(p => `FILE: ${p}\n\`\`\`\n${fs.readFileSync(p, 'utf8')}\n\`\`\``).join('\n\n');
+            const textarea = await this.page.$('textarea, [contenteditable="true"]');
+            if (textarea) {
+                await textarea.fill(contents);
+                // Store that we already filled the textarea so sendPrompt doesn't overwrite
+                (this as any)._hasUploadedViaFallback = true;
+            }
+        }
+    }
+
+    async sendPrompt(prompt: string): Promise<void> {
+        const textarea = await this.page.$('textarea, [contenteditable="true"]');
+        if (!textarea) return;
+
+        // If we already filled the textarea with file content, append the prompt
+        if ((this as any)._hasUploadedViaFallback) {
+            await textarea.type('\n\n' + prompt);
+            (this as any)._hasUploadedViaFallback = false;
+        } else {
+            await textarea.fill(prompt);
+        }
+        await this.page.keyboard.press('Enter');
+    }
+
+    async waitForResponse(): Promise<AIResponse> {
+        Logger.info('ChatGPT: Waiting for response...');
+
+        // Wait for generation to finish (stop button disappears)
+        try {
+            await this.page.waitForSelector('button[aria-label="Stop generating"], button:has-text("Stop")', { state: 'detached', timeout: 120000 });
+        } catch {
+            Logger.warn('ChatGPT: Stop button not found or already gone.');
+        }
+
+        // Wait for the assistant message to appear
+        await this.page.waitForSelector('[data-message-author-role="assistant"]', { timeout: 30000 });
+        await this.page.waitForTimeout(1000);
+
+        // Extract the LAST assistant message (not the first .markdown)
+        const responseText = await this.page.evaluate(() => {
+            const messages = document.querySelectorAll('[data-message-author-role="assistant"] .markdown');
+            if (messages.length === 0) return '';
+            return messages[messages.length - 1]?.textContent || '';
+        });
+
+        Logger.info(`ChatGPT: Response captured (${responseText.length} chars).`);
+        return { content: responseText || '' };
+    }
+}

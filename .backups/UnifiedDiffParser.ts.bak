@@ -1,0 +1,72 @@
+export interface DiffChange {
+    filePath: string;
+    content: string;
+}
+
+export class UnifiedDiffParser {
+    /**
+     * Clean the response text by removing common UI artifacts.
+     */
+    private static cleanResponse(text: string): string {
+        // Remove lines that are clearly not part of a diff (like button labels)
+        const lines = text.split('\n');
+        const cleanedLines = lines.filter(line => {
+            const trimmed = line.trim();
+            // Skip lines that are UI artifacts
+            if (trimmed.startsWith('diffCopyDownload')) return false;
+            if (trimmed.startsWith('Copy')) return false;
+            if (trimmed.startsWith('Download')) return false;
+            if (trimmed === '```') return false; // Markdown code fence
+            return true;
+        });
+        return cleanedLines.join('\n');
+    }
+
+    static parse(diff: any): DiffChange[] {
+        if (!diff || typeof diff !== 'string') {
+            console.warn('UnifiedDiffParser received non-string input:', diff);
+            return [];
+        }
+
+        // Clean the diff text first
+        let cleanedDiff = this.cleanResponse(diff);
+        
+        // Extract code blocks if present (markdown ```diff ... ```)
+        const codeBlockMatch = cleanedDiff.match(/```(?:diff)?\s*([\s\S]*?)```/i);
+        if (codeBlockMatch) {
+            cleanedDiff = codeBlockMatch[1];
+        }
+
+        const files: DiffChange[] = [];
+        const blocks = cleanedDiff.split(/^diff --git /m);
+        
+        for (const block of blocks) {
+            if (!block.trim()) continue;
+            
+            const lines = block.split('\n');
+            const fileLine = lines[0];
+            
+            // Match a/... b/...
+            const match = fileLine.match(/a\/(.+?)\s+b\/(.+)/);
+            if (!match) continue;
+            
+            const filePath = match[2].trim();
+            
+            // For new files, there's no "--- a/..." line, so we handle specially
+            const isNewFile = lines.some(l => l.startsWith('--- /dev/null'));
+            
+            // Extract content: all lines starting with '+' except '+++'
+            const contentLines = lines
+                .filter(l => l.startsWith('+') && !l.startsWith('+++'))
+                .map(l => l.slice(1));
+            
+            const content = contentLines.join('\n');
+            
+            if (content.trim() || isNewFile) {
+                files.push({ filePath, content });
+            }
+        }
+        
+        return files;
+    }
+}

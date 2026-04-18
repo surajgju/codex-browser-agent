@@ -1,0 +1,46 @@
+import { Logger } from '../utils/logger';
+
+export interface FileBlock {
+    path: string;
+    content: string;
+}
+
+export class ResponseParser {
+    static cleanResponse(text: string): string {
+        return text;
+    }
+
+    static parseFILEBlocks(text: any): FileBlock[] {
+        if (!text || typeof text !== 'string') {
+            Logger.warn('ResponseParser received non-string input');
+            return [];
+        }
+        const cleaned = text;
+        Logger.info(`ResponseParser: Parsing ${cleaned.length} chars`);
+        
+        const fileChanges: FileBlock[] = [];
+        // Match FILE: path (anything until newline) then content until END_FILE
+        const regex = /FILE:\s*([^\n]+)\s*\n([\s\S]*?)END_FILE/g;
+        let match;
+        while ((match = regex.exec(cleaned)) !== null) {
+            let filePath = match[1].trim();
+            // Remove trailing artifacts like "CopyDownload" or ".htmlCopyDownload"
+            filePath = filePath.replace(/(Copy|Download|CopyDownload|\.html).*$/i, '');
+            const content = match[2].trim();
+            fileChanges.push({ path: filePath, content });
+            Logger.info(`ResponseParser: Found FILE block for ${filePath} (${content.length} chars)`);
+        }
+        return fileChanges;
+    }
+
+    static parseCommands(text: any): string[] {
+        if (!text || typeof text !== 'string') return [];
+        const cmds: string[] = [];
+        const regex = /COMMAND:\s*(.*)/g;
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+            cmds.push(match[1]);
+        }
+        return cmds;
+    }
+}

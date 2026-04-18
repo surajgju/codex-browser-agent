@@ -1,0 +1,26 @@
+.container {
+    padding: 10px;
+    font-family: var(--vscode-font-family);
+}
+button {
+    margin: 5px 0;
+    padding: 5px 10px;
+}
+#file-list {
+    max-height: 150px;
+    overflow-y: auto;
+}
+#prompt-input {
+    width: 100%;
+    height: 80px;
+    margin: 5px 0;
+}
+#response-content {
+    background: var(--vscode-editor-background);
+    color: var(--vscode-editor-foreground);
+    padding: 5px;
+    border: 1px solid var(--vscode-panel-border);
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+}

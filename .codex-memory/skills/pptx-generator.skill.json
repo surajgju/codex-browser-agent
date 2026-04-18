@@ -1,0 +1,10 @@
+{
+  "name": "pptx-generator",
+  "description": "Generate professional, on-brand presentation slides and LinkedIn carousels using python-pptx",
+  "triggerKeywords": ["presentation", "slides", "pptx", "carousel", "linkedin carousel", "slide deck"],
+  "promptTemplate": "Create a presentation with {num_slides} slides about {topic}. Use the brand system at brands/{brand_name}/. Follow the visual-first layout selection: prefer multi-card, stats, two-column, circular-hero, or quote layouts over content-slide.",
+  "contextTemplate": "Brand files: brand.json, config.json, brand-system.md, tone-of-voice.md\nAvailable layouts: title, content, stats, two-column, multi-card, floating-cards, circular-hero, quote, chart, code.",
+  "postActions": [
+    { "type": "command", "value": "python scripts/generate_pptx.py --output {output_file}" }
+  ]
+}

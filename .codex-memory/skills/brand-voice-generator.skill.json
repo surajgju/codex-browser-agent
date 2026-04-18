@@ -1,0 +1,10 @@
+{
+  "name": "brand-voice-generator",
+  "description": "Generate tone-of-voice and brand-system files for presentations and content",
+  "triggerKeywords": ["brand", "voice", "tone", "brand system", "visual identity", "color palette"],
+  "promptTemplate": "Help me create a brand system for {project}. Walk me through defining: 1) Brand basics (name, description, primary use case), 2) 10 color values, 3) Typography (heading, body, code fonts), 4) Logo/icon assets, 5) Voice personality, vocabulary, and sentence patterns. Create brand.json, config.json, brand-system.md, and tone-of-voice.md files.",
+  "contextTemplate": "Workspace: {workspace}\nFiles: {files}\nRecent iterations: {iterations}",
+  "postActions": [
+    { "type": "command", "value": "echo 'Brand files created. Review .codex-memory/brands/' }
+  ]
+}
