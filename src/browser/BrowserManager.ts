@@ -29,6 +29,7 @@ export class BrowserManager {
             await this.launchBrowser(platform);
         }
         const { context } = this.browsers.get(platform)!;
+        Logger.info(`BrowserManager: Reusing existing browser context for ${platform}`);
         const pages = context.pages();
         if (pages.length > 0) {
             Logger.info(`BrowserManager: Reusing existing page for ${platform}`);

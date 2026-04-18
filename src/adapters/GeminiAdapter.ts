@@ -6,9 +6,9 @@ export class GeminiAdapter extends PlatformAdapter {
 
     async ensureLoggedIn(): Promise<void> {
         try {
-            await this.page.goto('https://gemini.google.com', { waitUntil: 'domcontentloaded' });
+            await this.navigateToChatIfNeeded('https://gemini.google.com');
             await this.page.waitForSelector('textarea, [contenteditable="true"], .input-area', { timeout: 10000 });
-            Logger.info('Gemini: Logged in.');
+            Logger.info('Gemini: Logged in and ready.');
         } catch (e) {
             Logger.error(`Gemini login failed: ${e}`);
             throw e;

@@ -6,9 +6,9 @@ export class GrokAdapter extends PlatformAdapter {
     
     async ensureLoggedIn(): Promise<void> {
         Logger.info('Grok: Starting ensureLoggedIn logic...');
-        await this.page.goto('https://grok.x.ai');
+        await this.navigateToChatIfNeeded('https://grok.x.ai');
         await this.page.waitForSelector('textarea', { timeout: 0 });
-        Logger.info('Grok: Logged in.');
+        Logger.info('Grok: Logged in and ready.');
     }
     
     async uploadFiles(filePaths: string[]): Promise<void> {

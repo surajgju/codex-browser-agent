@@ -6,9 +6,9 @@ export class DeepSeekAdapter extends PlatformAdapter {
 
     async ensureLoggedIn(): Promise<void> {
         try {
-            await this.page.goto('https://chat.deepseek.com', { waitUntil: 'domcontentloaded' });
+            await this.navigateToChatIfNeeded('https://chat.deepseek.com');
             await this.page.waitForSelector('textarea, [contenteditable="true"]', { timeout: 10000 });
-            Logger.info('DeepSeek: Logged in.');
+            Logger.info('DeepSeek: Logged in and ready.');
         } catch (e) {
             Logger.error(`DeepSeek login failed: ${e}`);
             throw e;

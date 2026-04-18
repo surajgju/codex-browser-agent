@@ -72,10 +72,10 @@ export class SyncEngine {
             const context = this.retrievalEngine.buildContext(prompt, workspaceRoot);
             const contextBlock = this.retrievalEngine.formatContextForPrompt(context);
             
-            const augmentedPrompt = `${contextBlock}\n\n## User Request\n${prompt}`;
-
             Logger.info(`SyncEngine: Agent prompt augmented`);
-            await adapter.initialize();
+            if (!adapter.initialized) {
+                await adapter.initialize();
+            }
             
             const agent = new AgentLoop(adapter, this.lspClient, this.vectorStore);
             await agent.run(augmentedPrompt);

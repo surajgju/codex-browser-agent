@@ -6,9 +6,9 @@ export class ChatGPTAdapter extends PlatformAdapter {
 
     async ensureLoggedIn(): Promise<void> {
         try {
-            await this.page.goto('https://chat.openai.com', { waitUntil: 'domcontentloaded' });
+            await this.navigateToChatIfNeeded('https://chat.openai.com');
             await this.page.waitForSelector('textarea[placeholder*="Message"], [contenteditable="true"]', { timeout: 10000 });
-            Logger.info('ChatGPT: Logged in.');
+            Logger.info('ChatGPT: Logged in and ready.');
         } catch (e) {
             Logger.error(`ChatGPT login failed: ${e}`);
             throw e;
