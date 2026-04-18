@@ -34,7 +34,15 @@ export class ToolExecutor {
 
     private async readFile(filePath: string): Promise<string> {
         try {
-            return fs.readFileSync(filePath, 'utf-8');
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n');
+            if (lines.length > 500) {
+                // Return first 100 lines + last 100 lines
+                const summary = lines.slice(0, 100).join('\n') + '\n...\n' + lines.slice(-100).join('\n');
+                Logger.info(`SyncEngine: Truncated large file ${filePath} from ${lines.length} to 200 lines`);
+                return summary;
+            }
+            return content;
         } catch (err) {
             return `Error reading file: ${err}`;
         }

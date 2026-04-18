@@ -72,10 +72,28 @@ export class SyncEngine {
             const context = this.retrievalEngine.buildContext(prompt, workspaceRoot);
             const contextBlock = this.retrievalEngine.formatContextForPrompt(context);
             
+            const augmentedPrompt = `${contextBlock}\n\n## User Request\n${prompt}`;
+
+            // Filter files intelligently before uploading to the browser
+            const relevantFiles = await this.selectRelevantFiles(files, prompt);
+            
+            // If no relevant files found but user selected many, ask user or limit
+            if (relevantFiles.length === 0 && files.length > 0) {
+                const answer = await vscode.window.showWarningMessage(
+                    `Could not automatically select relevant files from ${files.length}. Upload all?`,
+                    'Yes, upload all', 'Cancel'
+                );
+                if (answer !== 'Yes, upload all') return;
+                relevantFiles.push(...files.slice(0, 10)); // Limit to safe number
+            }
+
             Logger.info(`SyncEngine: Agent prompt augmented`);
             if (!adapter.initialized) {
                 await adapter.initialize();
             }
+            
+            // Upload only the selected relevant files
+            await adapter.uploadFiles(relevantFiles);
             
             const agent = new AgentLoop(adapter, this.lspClient, this.vectorStore);
             await agent.run(augmentedPrompt);
@@ -95,6 +113,46 @@ export class SyncEngine {
             Logger.error(`SyncEngine: Agent loop failed - ${error}`);
             this.errorHandler.handle(error);
         }
+    }
+
+    private async selectRelevantFiles(allFiles: string[], prompt: string): Promise<string[]> {
+        const MAX_FILES = 10;          // UI attachment limit
+        
+        // 1. If total files are small, return all
+        if (allFiles.length <= MAX_FILES) return allFiles;
+
+        // 2. Use vector search if available
+        let relevant: { path: string; score: number }[] = [];
+        if (this.vectorStore) {
+            for (const file of allFiles) {
+                // Index file if not already indexed (best effort)
+                await this.vectorStore.indexFile(file);
+            }
+            const results = await this.vectorStore.search(prompt, MAX_FILES);
+            relevant = results.map(r => ({ path: r.filePath, score: r.score }));
+        }
+
+        // 3. Fallback: keyword matching on filename + extension priority
+        if (relevant.length === 0) {
+            const promptWords = prompt.toLowerCase().split(/\W+/);
+            relevant = allFiles.map(file => {
+                const lower = file.toLowerCase();
+                let score = 0;
+                for (const word of promptWords) {
+                    if (lower.includes(word)) score += 10;
+                }
+                // Boost files open in editor
+                if (vscode.window.activeTextEditor?.document.uri.fsPath === file) score += 50;
+                // Boost based on extension (source files first)
+                if (/\.(ts|js|py|java|go|rs|cpp|c)$/.test(file)) score += 5;
+                return { path: file, score };
+            }).sort((a, b) => b.score - a.score);
+        }
+
+        // 4. Take top MAX_FILES
+        const selected = relevant.slice(0, MAX_FILES).map(r => r.path);
+        Logger.info(`SyncEngine: Selected ${selected.length} relevant files out of ${allFiles.length}`);
+        return selected;
     }
 
     async applyResponse(responseData: any) {

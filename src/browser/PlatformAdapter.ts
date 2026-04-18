@@ -1,5 +1,6 @@
 import { Page } from 'playwright';
 import { BrowserManager } from './BrowserManager';
+import { Logger } from '../utils/logger';
 
 export interface AIResponse {
     content: string;
